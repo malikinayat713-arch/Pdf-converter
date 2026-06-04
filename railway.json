@@ -1,0 +1,12 @@
+{
+  "buildCommand": "cd backend && npm install",
+  "startCommand": "cd backend && npm start",
+  "envs": {
+    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_CLIENT_SECRET": "",
+    "GOOGLE_REDIRECT_URI": "",
+    "SESSION_SECRET": "urdu-converter-production-secret-2024",
+    "FRONTEND_URL": "",
+    "PORT": "3000"
+  }
+}
