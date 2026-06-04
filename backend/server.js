@@ -53,7 +53,8 @@ app.get('/auth/google/callback', async (req, res) => {
     const { data: u } = await google.oauth2({ version: 'v2', auth: oauth2Client }).userinfo.get();
     req.session.tokens = tokens;
     req.session.user = { id: u.id, name: u.name, email: u.email, picture: u.picture };
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=success`);
+    const userData = Buffer.from(JSON.stringify(req.session.user)).toString('base64');
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=success&user=${userData}`);
   } catch (e) {
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=error`);
   }

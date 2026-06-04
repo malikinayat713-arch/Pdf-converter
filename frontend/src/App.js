@@ -18,17 +18,19 @@ export default function App() {
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.get('login') === 'success') {
-      window.history.replaceState({}, '', '/');
-      axios.get(`${API}/auth/user`, { withCredentials: true })
-        .then(r => {
-          if (r.data.loggedIn && r.data.user) {
-            localStorage.setItem('user', JSON.stringify(r.data.user));
-            setUser(r.data.user);
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLoading(false));
-      return;
+      try {
+        const userData = p.get('user');
+        if (userData) {
+          const user = JSON.parse(atob(userData));
+          localStorage.setItem('user', JSON.stringify(user));
+          setUser(user);
+          window.history.replaceState({}, '', '/');
+          setLoading(false);
+          return;
+        }
+      } catch (e) {
+        console.error('Failed to parse user data:', e);
+      }
     }
     const savedUser = localStorage.getItem('user');
     if (savedUser) {
