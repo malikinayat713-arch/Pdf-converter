@@ -54,7 +54,8 @@ app.get('/auth/google/callback', async (req, res) => {
     req.session.tokens = tokens;
     req.session.user = { id: u.id, name: u.name, email: u.email, picture: u.picture };
     const userData = Buffer.from(JSON.stringify(req.session.user)).toString('base64');
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=success&user=${userData}`);
+    const tokenData = Buffer.from(JSON.stringify(tokens)).toString('base64');
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=success&user=${userData}&token=${tokenData}`);
   } catch (e) {
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=error`);
   }
@@ -203,7 +204,20 @@ async function buildWordDoc(extractedTexts, outputPath) {
 }
 
 // ─── Convert Route ────────────────────────────────────────────────────────────
-app.post('/api/convert', requireAuth, upload.single('pdf'), async (req, res) => {
+app.post('/api/convert', (req, res, next) => {
+  if (!req.session.tokens && !req.session.user && !req.headers['x-tokens']) {
+    return res.status(401).json({ error: 'Login karo' });
+  }
+  if (req.headers['x-tokens']) {
+    try {
+      const tokens = JSON.parse(Buffer.from(req.headers['x-tokens'], 'base64').toString());
+      req.session.tokens = tokens;
+    } catch (e) {
+      console.error('Failed to parse tokens from header:', e);
+    }
+  }
+  next();
+}, upload.single('pdf'), async (req, res) => {
   const jobId = uuidv4();
   res.json({ jobId });
 

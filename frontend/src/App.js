@@ -20,9 +20,14 @@ export default function App() {
     if (p.get('login') === 'success') {
       try {
         const userData = p.get('user');
+        const tokenData = p.get('token');
         if (userData) {
           const user = JSON.parse(atob(userData));
           localStorage.setItem('user', JSON.stringify(user));
+          if (tokenData) {
+            const tokens = JSON.parse(atob(tokenData));
+            localStorage.setItem('tokens', JSON.stringify(tokens));
+          }
           setUser(user);
           window.history.replaceState({}, '', '/');
           setLoading(false);
@@ -69,7 +74,10 @@ export default function App() {
     setProgress({ step: 1, percent: 0, message: 'Shuru ho raha hai...', status: 'processing' });
     const fd = new FormData(); fd.append('pdf', file);
     try {
-      const { data } = await axios.post(`${API}/api/convert`, fd, { withCredentials: true });
+      const headers = { withCredentials: true };
+      const tokens = localStorage.getItem('tokens');
+      if (tokens) headers['X-Tokens'] = tokens;
+      const { data } = await axios.post(`${API}/api/convert`, fd, { withCredentials: true, headers });
       if (esRef.current) esRef.current.close();
       const es = new EventSource(`${API}/api/progress/${data.jobId}`);
       esRef.current = es;
