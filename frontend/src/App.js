@@ -19,17 +19,32 @@ export default function App() {
     const p = new URLSearchParams(window.location.search);
     if (p.get('login') === 'success') {
       window.history.replaceState({}, '', '/');
-      setTimeout(() => window.location.reload(), 500);
+      axios.get(`${API}/auth/user`, { withCredentials: true })
+        .then(r => {
+          if (r.data.loggedIn && r.data.user) {
+            localStorage.setItem('user', JSON.stringify(r.data.user));
+            setUser(r.data.user);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
       return;
     }
-    axios.get(`${API}/auth/user`, { withCredentials: true })
-      .then(r => setUser(r.data.loggedIn ? r.data.user : null))
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false));
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+      setLoading(false);
+    } else {
+      axios.get(`${API}/auth/user`, { withCredentials: true })
+        .then(r => setUser(r.data.loggedIn ? r.data.user : null))
+        .catch(() => setUser(null))
+        .finally(() => setLoading(false));
+    }
   }, []);
 
   const logout = async () => {
     await axios.post(`${API}/auth/logout`, {}, { withCredentials: true });
+    localStorage.removeItem('user');
     setUser(null); reset();
   };
 
