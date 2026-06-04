@@ -17,7 +17,11 @@ export default function App() {
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    if (p.get('login')) window.history.replaceState({}, '', '/');
+    if (p.get('login') === 'success') {
+      window.history.replaceState({}, '', '/');
+      setTimeout(() => window.location.reload(), 500);
+      return;
+    }
     axios.get(`${API}/auth/user`, { withCredentials: true })
       .then(r => setUser(r.data.loggedIn ? r.data.user : null))
       .catch(() => setUser(null))
