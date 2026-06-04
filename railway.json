@@ -1,4 +1,9 @@
 {
-  "buildCommand": "npm install",
-  "startCommand": "npm start"
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "npm install"
+  },
+  "deploy": {
+    "startCommand": "npm start"
+  }
 }
