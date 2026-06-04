@@ -64,8 +64,8 @@ app.get('/auth/user', (req, res) =>
 app.post('/auth/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 
 const requireAuth = (req, res, next) => {
-  if (!req.session.tokens) return res.status(401).json({ error: 'Login karo' });
-  oauth2Client.setCredentials(req.session.tokens);
+  if (!req.session.tokens && !req.session.user) return res.status(401).json({ error: 'Login karo' });
+  if (req.session.tokens) oauth2Client.setCredentials(req.session.tokens);
   next();
 };
 
