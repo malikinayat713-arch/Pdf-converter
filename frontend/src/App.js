@@ -65,10 +65,10 @@ export default function App() {
     setError(null);
     const fd = new FormData(); fd.append('pdf', file);
     try {
-      const headers = { withCredentials: true };
+      const config = { withCredentials: true };
       const tokens = localStorage.getItem('tokens');
-      if (tokens) headers['X-Tokens'] = tokens;
-      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, { withCredentials: true, headers });
+      if (tokens) config.headers = { 'X-Tokens': tokens };
+      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, config);
       setPdfId(data.pdfId);
       setError(null);
     } catch (e) {
@@ -80,12 +80,12 @@ export default function App() {
     if (!pdfId || !searchTerm.trim()) return;
     setSearching(true);
     try {
-      const headers = { withCredentials: true };
+      const config = { withCredentials: true };
       const tokens = localStorage.getItem('tokens');
-      if (tokens) headers['X-Tokens'] = tokens;
+      if (tokens) config.headers = { 'X-Tokens': tokens };
       const { data } = await axios.post(`${API}/api/pdf/search`,
         { pdfId, searchTerm, caseSensitive: false, wholeWord: false },
-        { withCredentials: true, headers });
+        config);
       setSearchResults(data);
       setError(null);
     } catch (e) {
@@ -115,10 +115,10 @@ export default function App() {
     setProgress({ step: 1, percent: 0, message: 'Shuru ho raha hai...', status: 'processing' });
     const fd = new FormData(); fd.append('pdf', file);
     try {
-      const headers = { withCredentials: true };
+      const config = { withCredentials: true };
       const tokens = localStorage.getItem('tokens');
-      if (tokens) headers['X-Tokens'] = tokens;
-      const { data } = await axios.post(`${API}/api/convert`, fd, { withCredentials: true, headers });
+      if (tokens) config.headers = { 'X-Tokens': tokens };
+      const { data } = await axios.post(`${API}/api/convert`, fd, config);
       if (esRef.current) esRef.current.close();
       const es = new EventSource(`${API}/api/progress/${data.jobId}`);
       esRef.current = es;
@@ -353,41 +353,6 @@ export default function App() {
           </div>
         )}
 
-                {error && (
-                  <div className="err-box">
-                    <span>⚠️</span> {error}
-                  </div>
-                )}
-
-                {file && (
-                  <button className="btn-conv" onClick={convert}>
-                    <span className="btn-conv-ic">🚀</span>
-                    Convert Karo
-                    <span className="btn-conv-arr">→</span>
-                  </button>
-                )}
-
-                {/* How it works */}
-                <div className="how-card">
-                  <div className="how-title">⚡ Kaise kaam karta hai?</div>
-                  <div className="how-steps">
-                    {[
-                      ['📄','PDF upload karo (1000 pages tak)'],
-                      ['🖼️','Har page image mein convert hota hai'],
-                      ['🔍','Google Drive OCR se Urdu text nikalti hai'],
-                      ['📝','Editable Word file (.docx) download karo'],
-                    ].map(([ic, txt], i) => (
-                      <div className="how-step" key={i}>
-                        <div className="how-num">{i+1}</div>
-                        <div className="how-ic">{ic}</div>
-                        <div className="how-txt">{txt}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* Progress */}
             {progress?.status === 'processing' && (
               <div className="prog-card">
@@ -474,7 +439,9 @@ export default function App() {
                       <div className="drop-st">ya click karke select karo</div>
                     </div>
                   )}
-
+                </div>
+              </div>
+            )}
       </main>
 
       <footer className="footer">
