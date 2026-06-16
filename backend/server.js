@@ -114,12 +114,17 @@ app.post('/api/pdf/extract', requireAuth, upload.single('pdf'), async (req, res)
     const pdfId = uuidv4();
 
     const pages = await extractPdfText(pdfData);
+    const totalChars = pages.reduce((sum, p) => sum + p.text.length, 0);
+    console.log(`PDF extracted: ${pages.length} pages, ${totalChars} chars total`);
+    if (pages.length > 0) console.log(`Page 1 sample: ${pages[0].text.substring(0, 200)}`);
+
     pdfCache.set(pdfId, { pages, uploadedAt: Date.now() });
     setTimeout(() => pdfCache.delete(pdfId), PDF_CACHE_TTL);
 
     fs.unlinkSync(req.file.path);
-    res.json({ pdfId, pageCount: pages.length });
+    res.json({ pdfId, pageCount: pages.length, extractedChars: totalChars });
   } catch (e) {
+    console.error('Extract error:', e);
     res.status(500).json({ error: 'PDF extract mein error: ' + e.message });
   }
 });
