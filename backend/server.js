@@ -65,7 +65,18 @@ app.get('/auth/user', (req, res) =>
 app.post('/auth/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 
 const requireAuth = (req, res, next) => {
-  if (!req.session.tokens && !req.session.user) return res.status(401).json({ error: 'Login karo' });
+  const tokenHeader = req.headers['x-tokens'] || req.get('X-Tokens');
+  if (!req.session.tokens && !req.session.user && !tokenHeader) {
+    return res.status(401).json({ error: 'Login karo' });
+  }
+  if (tokenHeader) {
+    try {
+      const tokens = JSON.parse(tokenHeader);
+      req.session.tokens = tokens;
+    } catch (e) {
+      console.error('Failed to parse tokens:', e.message);
+    }
+  }
   if (req.session.tokens) oauth2Client.setCredentials(req.session.tokens);
   next();
 };
@@ -271,12 +282,14 @@ async function buildWordDoc(extractedTexts, outputPath) {
 
 // ─── Convert Route ────────────────────────────────────────────────────────────
 app.post('/api/convert', (req, res, next) => {
-  if (!req.session.tokens && !req.session.user && !req.headers['x-tokens']) {
+  const tokenHeader = req.headers['x-tokens'] || req.get('X-Tokens');
+  if (!req.session.tokens && !req.session.user && !tokenHeader) {
+    console.log('Auth failed - no tokens. Headers:', req.headers);
     return res.status(401).json({ error: 'Login karo' });
   }
-  if (req.headers['x-tokens']) {
+  if (tokenHeader) {
     try {
-      const tokens = JSON.parse(req.headers['x-tokens']);
+      const tokens = JSON.parse(tokenHeader);
       req.session.tokens = tokens;
     } catch (e) {
       console.error('Failed to parse tokens from header:', e.message);
