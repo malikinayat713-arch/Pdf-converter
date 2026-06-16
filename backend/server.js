@@ -87,7 +87,7 @@ const PDF_CACHE_TTL = 3600000; // 1 hour
 
 async function extractPdfText(pdfData) {
   const pdfDoc = await pdfjsLib.getDocument({
-    data: pdfData, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
+    data: new Uint8Array(pdfData), useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
   }).promise;
   const pageCount = pdfDoc.numPages;
   const pages = [];
