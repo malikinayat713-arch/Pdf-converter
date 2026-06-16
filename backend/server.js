@@ -70,6 +70,72 @@ const requireAuth = (req, res, next) => {
   next();
 };
 
+// ─── PDF Search & Extract Cache ──────────────────────────────────────────────
+const pdfCache = new Map();
+const PDF_CACHE_TTL = 3600000; // 1 hour
+
+async function extractPdfText(pdfData) {
+  const pdfDoc = await pdfjsLib.getDocument({
+    data: pdfData, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
+  }).promise;
+  const pageCount = pdfDoc.numPages;
+  const pages = [];
+
+  for (let i = 1; i <= pageCount; i++) {
+    const page = await pdfDoc.getPage(i);
+    const textContent = await page.getTextContent();
+    const text = textContent.items.map(item => item.str || '').join(' ');
+    pages.push({ pageNum: i, text });
+  }
+  return pages;
+}
+
+app.post('/api/pdf/extract', requireAuth, upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'PDF upload karo' });
+    const pdfData = fs.readFileSync(req.file.path);
+    const pdfId = uuidv4();
+
+    const pages = await extractPdfText(pdfData);
+    pdfCache.set(pdfId, { pages, uploadedAt: Date.now() });
+    setTimeout(() => pdfCache.delete(pdfId), PDF_CACHE_TTL);
+
+    fs.unlinkSync(req.file.path);
+    res.json({ pdfId, pageCount: pages.length });
+  } catch (e) {
+    res.status(500).json({ error: 'PDF extract mein error: ' + e.message });
+  }
+});
+
+app.post('/api/pdf/search', requireAuth, (req, res) => {
+  try {
+    const { pdfId, searchTerm, caseSensitive = false, wholeWord = false } = req.body;
+    if (!pdfId || !searchTerm) return res.status(400).json({ error: 'pdfId aur searchTerm chahiye' });
+
+    const cached = pdfCache.get(pdfId);
+    if (!cached) return res.status(404).json({ error: 'PDF cache expire hogaya, dobara upload karo' });
+
+    const pattern = wholeWord
+      ? new RegExp(`\\b${searchTerm}\\b`, caseSensitive ? 'g' : 'gi')
+      : new RegExp(searchTerm, caseSensitive ? 'g' : 'gi');
+
+    const results = [];
+    cached.pages.forEach(({ pageNum, text }) => {
+      const matches = text.match(pattern);
+      if (matches) {
+        const startIdx = Math.max(0, text.toLowerCase().indexOf(searchTerm.toLowerCase()) - 80);
+        const endIdx = Math.min(text.length, startIdx + 160);
+        const snippet = text.substring(startIdx, endIdx).trim();
+        results.push({ pageNum, matchCount: matches.length, snippet: `...${snippet}...` });
+      }
+    });
+
+    res.json({ searchTerm, totalMatches: results.reduce((sum, r) => sum + r.matchCount, 0), results });
+  } catch (e) {
+    res.status(500).json({ error: 'Search error: ' + e.message });
+  }
+});
+
 // ─── Progress SSE ─────────────────────────────────────────────────────────────
 const progressMap = new Map();
 app.get('/api/progress/:jobId', (req, res) => {
@@ -210,10 +276,10 @@ app.post('/api/convert', (req, res, next) => {
   }
   if (req.headers['x-tokens']) {
     try {
-      const tokens = JSON.parse(Buffer.from(req.headers['x-tokens'], 'base64').toString());
+      const tokens = JSON.parse(req.headers['x-tokens']);
       req.session.tokens = tokens;
     } catch (e) {
-      console.error('Failed to parse tokens from header:', e);
+      console.error('Failed to parse tokens from header:', e.message);
     }
   }
   next();

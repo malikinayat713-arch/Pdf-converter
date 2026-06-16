@@ -7,11 +7,16 @@ const API = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState('convert'); // 'convert' or 'search'
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [error, setError] = useState(null);
+  const [pdfId, setPdfId] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [searching, setSearching] = useState(false);
   const fileRef = useRef();
   const esRef = useRef();
 
@@ -53,6 +58,42 @@ export default function App() {
     await axios.post(`${API}/auth/logout`, {}, { withCredentials: true });
     localStorage.removeItem('user');
     setUser(null); reset();
+  };
+
+  const extractPdf = async () => {
+    if (!file) return;
+    setError(null);
+    const fd = new FormData(); fd.append('pdf', file);
+    try {
+      const headers = { withCredentials: true };
+      const tokens = localStorage.getItem('tokens');
+      if (tokens) headers['X-Tokens'] = tokens;
+      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, { withCredentials: true, headers });
+      setPdfId(data.pdfId);
+      setError(null);
+    } catch (e) {
+      setError(e.response?.data?.error || 'PDF extract fail');
+    }
+  };
+
+  const search = async () => {
+    if (!pdfId || !searchTerm.trim()) return;
+    setSearching(true);
+    try {
+      const headers = { withCredentials: true };
+      const tokens = localStorage.getItem('tokens');
+      if (tokens) headers['X-Tokens'] = tokens;
+      const { data } = await axios.post(`${API}/api/pdf/search`,
+        { pdfId, searchTerm, caseSensitive: false, wholeWord: false },
+        { withCredentials: true, headers });
+      setSearchResults(data);
+      setError(null);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Search fail');
+      setSearchResults(null);
+    } finally {
+      setSearching(false);
+    }
   };
 
   const handleDrop = useCallback(e => {
@@ -184,11 +225,31 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* ── Converter ── */
+          /* ── Converter/Search ── */
           <div className="conv-wrap">
             <div className="conv-hero">
-              <h1 className="conv-title">PDF → Word Convert Karo</h1>
-              <p className="conv-sub">Urdu PDF upload karo — editable Word file milegi</p>
+              <div className="mode-toggle">
+                <button
+                  className={`mode-btn ${mode === 'convert' ? 'active' : ''}`}
+                  onClick={() => { setMode('convert'); setSearchResults(null); setPdfId(null); setSearchTerm(''); }}
+                >
+                  📄 Convert
+                </button>
+                <button
+                  className={`mode-btn ${mode === 'search' ? 'active' : ''}`}
+                  onClick={() => { setMode('search'); setDownloadUrl(null); setProgress(null); }}
+                >
+                  🔍 Search
+                </button>
+              </div>
+              <h1 className="conv-title">
+                {mode === 'convert' ? 'PDF → Word Convert Karo' : 'PDF mein lafz dhundo'}
+              </h1>
+              <p className="conv-sub">
+                {mode === 'convert'
+                  ? 'Urdu PDF upload karo — editable Word file milegi'
+                  : 'PDF upload karo aur apna lafz search karo'}
+              </p>
             </div>
 
             {!progress && !downloadUrl && (
@@ -233,6 +294,64 @@ export default function App() {
                     </div>
                   )}
                 </div>
+                {error && <div className="err-box"><span>⚠️</span> {error}</div>}
+                {file && (
+                  <button className="btn-conv" onClick={extractPdf}>
+                    <span className="btn-conv-ic">📤</span>
+                    PDF Load Karo
+                    <span className="btn-conv-arr">→</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Search Interface */}
+            {mode === 'search' && pdfId && (
+              <div className="search-interface">
+                <div className="search-box">
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="لفظ یا جملہ لکھیں / Search word or phrase"
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    onKeyPress={e => e.key === 'Enter' && search()}
+                  />
+                  <button className="btn-search" onClick={search} disabled={searching}>
+                    {searching ? '⏳ Searching...' : '🔍 Search Karo'}
+                  </button>
+                  <button className="btn-back" onClick={() => { setPdfId(null); setFile(null); setSearchTerm(''); setSearchResults(null); }}>
+                    ↩ Back
+                  </button>
+                </div>
+
+                {searchResults && (
+                  <div className="search-results">
+                    <div className="results-header">
+                      <span className="results-title">"{searchResults.searchTerm}" ke results</span>
+                      <span className="results-count">Total matches: {searchResults.totalMatches}</span>
+                    </div>
+                    {searchResults.results.length > 0 ? (
+                      <div className="results-list">
+                        {searchResults.results.map((result, idx) => (
+                          <div key={idx} className="result-card">
+                            <div className="result-page">Page {result.pageNum}</div>
+                            <div className="result-count">{result.matchCount} match{result.matchCount > 1 ? 'es' : ''}</div>
+                            <div className="result-snippet">{result.snippet}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="no-results">
+                        <span>❌</span> "{searchResults.searchTerm}" nahi mila
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
                 {error && (
                   <div className="err-box">
@@ -328,8 +447,34 @@ export default function App() {
                 <button className="btn-retry" onClick={reset}>↩ Dobara Karo</button>
               </div>
             )}
-          </div>
-        )}
+
+            {/* ── SEARCH MODE ── */}
+            {mode === 'search' && !pdfId && (
+              <div className="search-section">
+                <div
+                  className={`drop ${dragOver ? 'drag' : ''} ${file ? 'has-file' : ''}`}
+                  onDrop={handleDrop}
+                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onClick={() => !file && fileRef.current.click()}
+                >
+                  {file ? (
+                    <div className="file-row">
+                      <div className="file-ic">📑</div>
+                      <div className="file-meta">
+                        <div className="file-nm">{file.name}</div>
+                        <div className="file-sz">{(file.size/1024).toFixed(1)} KB</div>
+                      </div>
+                      <button className="file-rm" onClick={e => { e.stopPropagation(); setFile(null); }}>✕</button>
+                    </div>
+                  ) : (
+                    <div className="drop-inner">
+                      <span className="drop-main-ic">📂</span>
+                      <div className="drop-txt">PDF upload karo search karne ke liye</div>
+                      <div className="drop-st">ya click karke select karo</div>
+                    </div>
+                  )}
+
       </main>
 
       <footer className="footer">
