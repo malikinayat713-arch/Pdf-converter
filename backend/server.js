@@ -95,8 +95,14 @@ async function extractPdfText(pdfData) {
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdfDoc.getPage(i);
     const textContent = await page.getTextContent();
-    const text = textContent.items.map(item => item.str || '').join(' ');
-    pages.push({ pageNum: i, text });
+    const text = textContent.items
+      .map(item => {
+        if (typeof item.str === 'string') return item.str;
+        if (item.fontName && item.hasEOL) return item.str || '\n';
+        return item.str || '';
+      })
+      .join('');
+    pages.push({ pageNum: i, text: text.trim() || '' });
   }
   return pages;
 }
@@ -126,17 +132,22 @@ app.post('/api/pdf/search', requireAuth, (req, res) => {
     const cached = pdfCache.get(pdfId);
     if (!cached) return res.status(404).json({ error: 'PDF cache expire hogaya, dobara upload karo' });
 
-    const pattern = wholeWord
-      ? new RegExp(`\\b${searchTerm}\\b`, caseSensitive ? 'g' : 'gi')
-      : new RegExp(searchTerm, caseSensitive ? 'g' : 'gi');
+    // Build regex pattern - handle Urdu/Persian characters
+    let patternStr = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (wholeWord) patternStr = `(^|\\s)${patternStr}(\\s|$)`;
+    const pattern = new RegExp(patternStr, caseSensitive ? 'g' : 'gi');
 
     const results = [];
     cached.pages.forEach(({ pageNum, text }) => {
+      if (!text) return;
       const matches = text.match(pattern);
-      if (matches) {
-        const startIdx = Math.max(0, text.toLowerCase().indexOf(searchTerm.toLowerCase()) - 80);
-        const endIdx = Math.min(text.length, startIdx + 160);
-        const snippet = text.substring(startIdx, endIdx).trim();
+      if (matches && matches.length > 0) {
+        const searchLower = caseSensitive ? searchTerm : searchTerm.toLowerCase();
+        const textLower = caseSensitive ? text : text.toLowerCase();
+        const idx = textLower.indexOf(searchLower);
+        const startIdx = Math.max(0, idx - 80);
+        const endIdx = Math.min(text.length, idx + searchTerm.length + 80);
+        const snippet = text.substring(startIdx, endIdx);
         results.push({ pageNum, matchCount: matches.length, snippet: `...${snippet}...` });
       }
     });
