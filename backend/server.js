@@ -17,25 +17,34 @@ app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', cred
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'urdu-secret',
-  resave: false, saveUninitialized: false,
+  resave: false,
+  saveUninitialized: false,
   cookie: { secure: true, httpOnly: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
 }));
 
+const WORD_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+  'application/msword',                                                         // .doc
+]);
+const PDF_MIME  = 'application/pdf';
+const IMG_MIMES = new Set(['image/jpeg','image/jpg','image/png','image/webp']);
+
 const upload = multer({
   dest: 'uploads/',
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB for 1000 pages
+  limits: { fileSize: 500 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const ok = ['application/pdf','image/jpeg','image/jpg','image/png','image/webp'];
-    ok.includes(file.mimetype) ? cb(null, true) : cb(new Error('Sirf PDF ya Image allowed hai'));
+    const ok = PDF_MIME === file.mimetype || WORD_MIMES.has(file.mimetype) || IMG_MIMES.has(file.mimetype);
+    ok ? cb(null, true) : cb(new Error('Sirf PDF, Word ya Image allowed hai'));
   }
 });
 
-// ─── OAuth ───────────────────────────────────────────────────────────────────
+// ─── OAuth Setup ─────────────────────────────────────────────────────────────
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
   process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5000/auth/google/callback'
 );
+
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/drive',
@@ -44,8 +53,13 @@ const SCOPES = [
 ];
 
 app.get('/auth/google', (req, res) => {
-  res.redirect(oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' }));
+  res.redirect(oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES,
+    prompt: 'consent'
+  }));
 });
+
 app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(req.query.code);
@@ -60,9 +74,17 @@ app.get('/auth/google/callback', async (req, res) => {
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=error`);
   }
 });
+
 app.get('/auth/user', (req, res) =>
-  req.session.user ? res.json({ loggedIn: true, user: req.session.user }) : res.json({ loggedIn: false }));
-app.post('/auth/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
+  req.session.user
+    ? res.json({ loggedIn: true, user: req.session.user })
+    : res.json({ loggedIn: false })
+);
+
+app.post('/auth/logout', (req, res) => {
+  req.session.destroy();
+  res.json({ success: true });
+});
 
 const requireAuth = (req, res, next) => {
   const tokenHeader = req.headers['x-tokens'] || req.get('X-Tokens');
@@ -74,129 +96,465 @@ const requireAuth = (req, res, next) => {
       const tokens = JSON.parse(tokenHeader);
       req.session.tokens = tokens;
     } catch (e) {
-      console.error('Failed to parse tokens:', e.message);
+      console.error('Parse error:', e.message);
     }
   }
   if (req.session.tokens) oauth2Client.setCredentials(req.session.tokens);
   next();
 };
 
-// ─── PDF Search & Extract Cache ──────────────────────────────────────────────
+// ─── PDF Cache & Text Extraction ─────────────────────────────────────────────
 const pdfCache = new Map();
 const PDF_CACHE_TTL = 3600000; // 1 hour
 
 async function extractPdfText(pdfData) {
   const pdfDoc = await pdfjsLib.getDocument({
-    data: new Uint8Array(pdfData), useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
+    data: new Uint8Array(pdfData),
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true
   }).promise;
+
   const pageCount = pdfDoc.numPages;
   const pages = [];
 
   for (let i = 1; i <= pageCount; i++) {
     const page = await pdfDoc.getPage(i);
     const textContent = await page.getTextContent();
-    const text = textContent.items
-      .map(item => {
-        if (typeof item.str === 'string') return item.str;
-        if (item.fontName && item.hasEOL) return item.str || '\n';
-        return item.str || '';
-      })
-      .join('');
-    pages.push({ pageNum: i, text: text.trim() || '' });
+
+    let text = '';
+    let lastY = null;
+
+    for (const item of textContent.items) {
+      // Add spacing between lines
+      if (lastY !== null && Math.abs(item.y - lastY) > 2) {
+        text += '\n';
+      }
+      text += (item.str || '');
+      lastY = item.y;
+    }
+
+    // Normalize: fix spaces and multiple lines
+    text = text
+      .replace(/\s+\n/g, '\n') // Remove trailing spaces
+      .replace(/\n\s+/g, '\n') // Remove leading spaces
+      .replace(/\n\n+/g, '\n') // Remove multiple newlines
+      .trim();
+
+    console.log(`Page ${i}: ${text.length} chars extracted`);
+    pages.push({ pageNum: i, text });
+  }
+
+  return pages;
+}
+
+// ─── Word (.docx) Text Extraction ────────────────────────────────────────────
+async function extractWordText(filePath) {
+  const mammoth = require('mammoth');
+  const result  = await mammoth.extractRawText({ path: filePath });
+  const full    = result.value || '';
+
+  // Split at natural line breaks; group ~25 lines per "page"
+  const lines = full.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [{ pageNum: 1, text: full }];
+
+  const LINES_PER_PAGE = 25;
+  const pages = [];
+  for (let i = 0; i < lines.length; i += LINES_PER_PAGE) {
+    pages.push({
+      pageNum: Math.floor(i / LINES_PER_PAGE) + 1,
+      text:    lines.slice(i, i + LINES_PER_PAGE).join('\n')
+    });
   }
   return pages;
 }
 
+// ─── PDF Extract Endpoint ────────────────────────────────────────────────────
 app.post('/api/pdf/extract', requireAuth, upload.single('pdf'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'PDF upload karo' });
-    const pdfData = fs.readFileSync(req.file.path);
+    if (!req.file) {
+      return res.status(400).json({ error: 'PDF file chahiye' });
+    }
+
+    const jobId = uuidv4();
     const pdfId = uuidv4();
+    const filePath  = req.file.path;
+    const fileMime  = req.file.mimetype;
+    const fileName  = req.file.originalname;
+    const pdfData   = WORD_MIMES.has(fileMime) ? null : fs.readFileSync(filePath);
 
-    const pages = await extractPdfText(pdfData);
-    const totalChars = pages.reduce((sum, p) => sum + p.text.length, 0);
-    console.log(`PDF extracted: ${pages.length} pages, ${totalChars} chars total`);
-    if (pages.length > 0) console.log(`Page 1 sample: ${pages[0].text.substring(0, 200)}`);
+    const update = (percent, message) => {
+      progressMap.set(jobId, { percent, message, status: 'processing' });
+    };
 
-    pdfCache.set(pdfId, { pages, uploadedAt: Date.now() });
-    setTimeout(() => pdfCache.delete(pdfId), PDF_CACHE_TTL);
+    // Start background process
+    (async () => {
+      try {
+        let pages;
+        let usedOcr = false;
 
-    fs.unlinkSync(req.file.path);
-    res.json({ pdfId, pageCount: pages.length, extractedChars: totalChars });
+        // ── Word file: extract text directly (fast, no OCR) ─────────────────
+        if (WORD_MIMES.has(fileMime)) {
+          update(10, '📝 Word file se text nikal raha hai...');
+          pages = await extractWordText(filePath);
+          try { fs.unlinkSync(filePath); } catch (e) {}
+          update(90, `✅ ${pages.length} pages ready!`);
+
+        // ── PDF file: try direct text, fall back to OCR ──────────────────────
+        } else {
+          try { fs.unlinkSync(filePath); } catch (e) {}
+          update(5, '📄 PDF load ho rahi hai...');
+
+          pages = await extractPdfText(pdfData);
+          const totalChars = pages.reduce((sum, p) => sum + p.text.length, 0);
+          const avgPerPage = pages.length ? totalChars / pages.length : 0;
+          update(30, `📊 Text mila: ${totalChars} chars`);
+
+          const needsOcr = avgPerPage < 120;
+          usedOcr = needsOcr;
+
+          if (needsOcr) {
+            update(35, '🖼️ Image PDF detected — OCR shuru...');
+
+            const pdfDoc = await pdfjsLib.getDocument({
+              data: new Uint8Array(pdfData),
+              useWorkerFetch: false,
+              isEvalSupported: false,
+              useSystemFonts: true
+            }).promise;
+            const totalPages = pdfDoc.numPages;
+
+            const tempDir = path.join(__dirname, 'temp', pdfId);
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+            const imagePaths = [];
+            for (let i = 1; i <= totalPages; i++) {
+              const imgPath = path.join(tempDir, `page_${i}.png`);
+              try {
+                await pdfPageToImage(pdfData, i, imgPath);
+                imagePaths.push({ path: imgPath, mime: 'image/png', pageNum: i });
+              } catch (e) {
+                console.error(`Page ${i}:`, e.message);
+              }
+            }
+
+            update(50, '🖼️ Pages converted to images');
+
+            if (imagePaths.length > 0) {
+              const drive = google.drive({ version: 'v3', auth: oauth2Client });
+              const folder = await drive.files.create({
+                requestBody: { name: `SEARCH-${pdfId}`, mimeType: 'application/vnd.google-apps.folder' },
+                fields: 'id', timeout: 30000
+              });
+              const folderId = folder.data.id;
+              update(55, '🔤 OCR ho rahi hai...');
+
+              pages = Array.from({ length: totalPages }, (_, i) => ({ pageNum: i + 1, text: '' }));
+              const ocr = await ocrBatch(drive, folderId, imagePaths, (done) => {
+                update(55 + Math.round((done / imagePaths.length) * 40), `🔤 OCR: ${done}/${imagePaths.length} pages`);
+              });
+              ocr.forEach(({ page, text }) => {
+                if (page > 0 && page <= totalPages) pages[page - 1] = { pageNum: page, text };
+              });
+
+              try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+            }
+          }
+
+          update(95, '✅ Search ke liye taiyaar!');
+        }
+
+        // Cache pages (pdfData may be null for Word files — filtered PDF won't work but search/index will)
+        pdfCache.set(pdfId, {
+          pages,
+          pdfData,
+          fileName,
+          usedOcr,
+          isWord: WORD_MIMES.has(fileMime),
+          uploadedAt: Date.now()
+        });
+        setTimeout(() => pdfCache.delete(pdfId), PDF_CACHE_TTL);
+
+        const finalChars = pages.reduce((sum, p) => sum + (p.text ? p.text.length : 0), 0);
+        progressMap.set(jobId, {
+          percent: 100,
+          message: 'Done!',
+          status: 'done',
+          pdfId,
+          pageCount: pages.length,
+          extractedChars: finalChars
+        });
+      } catch (e) {
+        console.error('Extract error:', e.message);
+        progressMap.set(jobId, {
+          percent: 0,
+          message: `Error: ${e.message}`,
+          status: 'error'
+        });
+      }
+    })();
+
+    res.json({ jobId, pdfId });
   } catch (e) {
     console.error('Extract error:', e);
-    res.status(500).json({ error: 'PDF extract mein error: ' + e.message });
+    res.status(500).json({ error: 'PDF extract fail: ' + e.message });
   }
 });
 
+// Normalize Urdu/Arabic text so visually-identical letters match reliably.
+function normalizeUrdu(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    // Unify letter variants (Arabic ↔ Urdu)
+    .replace(/[يﻱﻲ]/g, 'ی')   // Arabic yeh → Urdu yeh
+    .replace(/[كﻙﻚ]/g, 'ک')   // Arabic kaf → Urdu kaf
+    .replace(/ۀ/g, 'ہ')
+    .replace(/[ةه]/g, 'ہ')      // teh marbuta / arabic heh → urdu heh
+    .replace(/[أإآ]/g, 'ا')     // alef variants → bare alef
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ی')
+    // Strip diacritics (zer/zabar/pesh/etc.) and kashida
+    .replace(/[ً-ْٰـ]/g, '')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ─── PDF Search Endpoint ─────────────────────────────────────────────────────
 app.post('/api/pdf/search', requireAuth, (req, res) => {
   try {
-    const { pdfId, searchTerm, caseSensitive = false, wholeWord = false } = req.body;
+    const { pdfId, searchTerm } = req.body;
     if (!pdfId || !searchTerm) return res.status(400).json({ error: 'pdfId aur searchTerm chahiye' });
 
     const cached = pdfCache.get(pdfId);
-    if (!cached) return res.status(404).json({ error: 'PDF cache expire hogaya, dobara upload karo' });
+    if (!cached) return res.status(404).json({ error: 'PDF cache expire hogaya' });
 
-    // Build regex pattern - handle Urdu/Persian characters
-    let patternStr = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (wholeWord) patternStr = `(^|\\s)${patternStr}(\\s|$)`;
-    const pattern = new RegExp(patternStr, caseSensitive ? 'g' : 'gi');
+    console.log(`🔍 Searching "${searchTerm}" in ${cached.pages.length} pages`);
+
+    const needle = normalizeUrdu(searchTerm);
+    if (!needle) return res.json({ searchTerm, totalMatches: 0, results: [] });
 
     const results = [];
+    let totalMatches = 0;
+
     cached.pages.forEach(({ pageNum, text }) => {
-      if (!text) return;
-      const matches = text.match(pattern);
-      if (matches && matches.length > 0) {
-        const searchLower = caseSensitive ? searchTerm : searchTerm.toLowerCase();
-        const textLower = caseSensitive ? text : text.toLowerCase();
-        const idx = textLower.indexOf(searchLower);
-        const startIdx = Math.max(0, idx - 80);
-        const endIdx = Math.min(text.length, idx + searchTerm.length + 80);
-        const snippet = text.substring(startIdx, endIdx);
-        results.push({ pageNum, matchCount: matches.length, snippet: `...${snippet}...` });
+      if (!text || text.length === 0) return;
+
+      const hay = normalizeUrdu(text);
+
+      // Count all occurrences on the normalized text
+      let matchCount = 0;
+      let idx = 0;
+      while ((idx = hay.indexOf(needle, idx)) !== -1) {
+        matchCount++;
+        idx += needle.length;
+      }
+
+      if (matchCount > 0) {
+        // Snippet from the ORIGINAL text near the first match in normalized text.
+        const firstIdx = hay.indexOf(needle);
+        const startIdx = Math.max(0, firstIdx - 50);
+        const endIdx = Math.min(text.length, firstIdx + needle.length + 50);
+        const snippet = text.substring(startIdx, endIdx).replace(/\s+/g, ' ').trim();
+
+        results.push({
+          pageNum,
+          matchCount,
+          snippet: snippet ? `…${snippet}…` : '[preview nahi]'
+        });
+        totalMatches += matchCount;
       }
     });
 
-    res.json({ searchTerm, totalMatches: results.reduce((sum, r) => sum + r.matchCount, 0), results });
+    console.log(`✅ Found on ${results.length} pages, ${totalMatches} total matches`);
+    res.json({ searchTerm, totalMatches, results });
   } catch (e) {
-    res.status(500).json({ error: 'Search error: ' + e.message });
+    console.error('Search error:', e);
+    res.status(500).json({ error: 'Search fail: ' + e.message });
   }
 });
 
-// ─── Progress SSE ─────────────────────────────────────────────────────────────
+// ─── Filtered PDF (only the pages where the word was found) ──────────────────
+app.post('/api/pdf/create-filtered', requireAuth, async (req, res) => {
+  try {
+    const { pdfId, pages } = req.body;
+    console.log(`📄 create-filtered: pdfId=${pdfId}, pages=${JSON.stringify(pages)}`);
+
+    if (!pdfId || !Array.isArray(pages) || pages.length === 0) {
+      return res.status(400).json({ error: 'pdfId aur pages chahiye' });
+    }
+
+    const cached = pdfCache.get(pdfId);
+    if (!cached) {
+      console.error('create-filtered: cache miss for', pdfId);
+      return res.status(404).json({ error: 'PDF cache expire hogaya, dobara upload karo' });
+    }
+    if (!cached.pdfData) {
+      console.error('create-filtered: pdfData missing in cache for', pdfId);
+      return res.status(404).json({ error: 'PDF data cache mein nahi, dobara upload karo' });
+    }
+
+    console.log(`create-filtered: pdfData size=${cached.pdfData.length} bytes`);
+
+    const { PDFDocument } = require('pdf-lib');
+    const pdfBytes = cached.pdfData instanceof Buffer
+      ? new Uint8Array(cached.pdfData.buffer, cached.pdfData.byteOffset, cached.pdfData.byteLength)
+      : new Uint8Array(cached.pdfData);
+
+    const srcDoc = await PDFDocument.load(pdfBytes);
+    const outDoc = await PDFDocument.create();
+
+    const total = srcDoc.getPageCount();
+    console.log(`create-filtered: source has ${total} pages, requested: ${pages}`);
+
+    // Unique, sorted, valid (0-based) page indices
+    const indices = [...new Set(pages)]
+      .map(n => n - 1)
+      .filter(i => i >= 0 && i < total)
+      .sort((a, b) => a - b);
+
+    if (indices.length === 0) {
+      return res.status(400).json({ error: `Koi valid page nahi (total=${total}, requested=${pages})` });
+    }
+
+    console.log(`create-filtered: copying indices: ${indices}`);
+    const copied = await outDoc.copyPages(srcDoc, indices);
+    copied.forEach(p => outDoc.addPage(p));
+
+    const bytes = await outDoc.save();
+    console.log(`create-filtered: output size=${bytes.length} bytes`);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="matching-pages.pdf"');
+    res.send(Buffer.from(bytes));
+  } catch (e) {
+    console.error('Filtered PDF error:', e.message, e.stack);
+    res.status(500).json({ error: 'PDF create fail: ' + e.message });
+  }
+});
+
+// ─── Details Report (.docx — Urdu-safe) ──────────────────────────────────────
+app.post('/api/pdf/create-report', requireAuth, async (req, res) => {
+  try {
+    const { pdfId, searchTerm, results } = req.body;
+    if (!pdfId || !searchTerm || !Array.isArray(results)) {
+      return res.status(400).json({ error: 'pdfId, searchTerm aur results chahiye' });
+    }
+
+    const cached = pdfCache.get(pdfId);
+    if (!cached) return res.status(404).json({ error: 'PDF cache expire' });
+
+    const {
+      Document, Paragraph, TextRun, AlignmentType, HeadingLevel, Packer, convertInchesToTwip
+    } = require('docx');
+    const FONT = 'Jameel Noori Nastaleeq';
+
+    const totalMatches = results.reduce((s, r) => s + (r.matchCount || 0), 0);
+
+    const children = [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: 'Search Report', bold: true, size: 40, color: '4361EE' })],
+        spacing: { after: 120 }
+      }),
+      new Paragraph({
+        alignment: AlignmentType.RIGHT,
+        bidirectional: true,
+        children: [new TextRun({ text: `لفظ: ${searchTerm}`, font: FONT, size: 32, rightToLeft: true, bold: true })],
+        spacing: { after: 80 }
+      }),
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        children: [new TextRun({
+          text: `Found on ${results.length} page(s) — ${totalMatches} total match(es)`,
+          size: 24, color: '64748B'
+        })],
+        spacing: { after: 240 }
+      })
+    ];
+
+    results.forEach((r) => {
+      children.push(new Paragraph({
+        alignment: AlignmentType.LEFT,
+        children: [
+          new TextRun({ text: `📄 Page ${r.pageNum}`, bold: true, size: 26, color: '1E293B' }),
+          new TextRun({ text: `   —   ${r.matchCount} time(s)`, size: 22, color: 'F59E0B' })
+        ],
+        spacing: { before: 160, after: 40 }
+      }));
+      if (r.snippet) {
+        children.push(new Paragraph({
+          alignment: AlignmentType.RIGHT,
+          bidirectional: true,
+          children: [new TextRun({ text: r.snippet, font: FONT, size: 26, rightToLeft: true })],
+          spacing: { after: 80 }
+        }));
+      }
+    });
+
+    const doc = new Document({
+      sections: [{
+        properties: { page: { margin: { top: convertInchesToTwip(1), right: convertInchesToTwip(1), bottom: convertInchesToTwip(1), left: convertInchesToTwip(1) } } },
+        children
+      }]
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', 'attachment; filename="search-report.docx"');
+    res.send(buffer);
+  } catch (e) {
+    console.error('Report error:', e);
+    res.status(500).json({ error: 'Report create fail: ' + e.message });
+  }
+});
+
+// ─── Progress SSE ────────────────────────────────────────────────────────────
 const progressMap = new Map();
+
 app.get('/api/progress/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  const send = d => res.write(`data: ${JSON.stringify(d)}\n\n`);
-  const iv = setInterval(() => {
-    const p = progressMap.get(req.params.jobId);
-    if (p) {
-      send(p);
-      if (p.status === 'done' || p.status === 'error') { clearInterval(iv); res.end(); }
+
+  const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  const interval = setInterval(() => {
+    const progress = progressMap.get(req.params.jobId);
+    if (progress) {
+      send(progress);
+      if (progress.status === 'done' || progress.status === 'error') {
+        clearInterval(interval);
+        res.end();
+      }
     }
   }, 400);
-  req.on('close', () => clearInterval(iv));
+
+  req.on('close', () => clearInterval(interval));
 });
 
-// ─── PDF → PNG (parallel batch) ──────────────────────────────────────────────
+// ─── PDF to Image Conversion (Balanced quality & speed) ──────────────────────
 async function pdfPageToImage(pdfData, pageNum, outputPath) {
   const pdfDoc = await pdfjsLib.getDocument({
-    data: pdfData, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
+    data: new Uint8Array(pdfData),
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true
   }).promise;
+
   const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale: 2.0 });
+  const viewport = page.getViewport({ scale: 2.5 }); // Balanced quality for OCR speed
   const canvas = createCanvas(viewport.width, viewport.height);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = 'white';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+
   await page.render({ canvasContext: ctx, viewport }).promise;
   fs.writeFileSync(outputPath, canvas.toBuffer('image/png'));
 }
 
-async function convertPagesParallel(pdfData, totalPages, tempDir, update) {
-  const CONCURRENT = 6; // 6 pages at once for speed
+async function convertPagesParallel(pdfData, totalPages, tempDir, updateProgress) {
+  const CONCURRENT = 8; // Faster conversion - more parallel processing
   const imagePaths = new Array(totalPages).fill(null);
   let done = 0;
 
@@ -206,76 +564,138 @@ async function convertPagesParallel(pdfData, totalPages, tempDir, update) {
       const imgPath = path.join(tempDir, `page_${i + 1}.png`);
       batch.push(
         pdfPageToImage(pdfData, i + 1, imgPath)
-          .then(() => { imagePaths[i] = { path: imgPath, mime: 'image/png' }; })
-          .catch(e => console.error(`Page ${i+1} error:`, e.message))
+          .then(() => {
+            imagePaths[i] = { path: imgPath, mime: 'image/png' };
+          })
+          .catch(e => {
+            console.error(`Page ${i + 1}:`, e.message);
+            imagePaths[i] = null;
+          })
       );
     }
     await Promise.all(batch);
     done = Math.min(start + CONCURRENT, totalPages);
-    update(2, Math.round(10 + (done / totalPages) * 35), `Images: ${done} / ${totalPages} pages...`);
+    updateProgress(Math.round(8 + (done / totalPages) * 30), `Pages: ${done}/${totalPages}`);
   }
-  return imagePaths.filter(Boolean);
+
+  const converted = imagePaths.filter(Boolean);
+  if (converted.length === 0) throw new Error('No pages converted successfully');
+  return converted;
 }
 
-// ─── OCR parallel batches ─────────────────────────────────────────────────────
+// ─── OCR Batch Processing (Optimized for Speed) ───────────────────────────────
 async function ocrBatch(drive, folderId, pages, onProgress) {
-  const CONCURRENT = 5;
+  const CONCURRENT = 10; // Increased for faster OCR
+  const MAX_RETRIES = 1;
   const results = new Array(pages.length).fill({ page: 0, text: '' });
   let done = 0;
 
-  for (let start = 0; start < pages.length; start += CONCURRENT) {
-    const batch = pages.slice(start, start + CONCURRENT).map(async ({ path: imgPath, mime, pageNum }, idx) => {
-      try {
-        const up = await drive.files.create({
-          requestBody: { name: `p${pageNum}`, parents: [folderId], mimeType: 'application/vnd.google-apps.document' },
-          media: { mimeType: mime, body: fs.createReadStream(imgPath) },
-          fields: 'id'
-        });
-        const docId = up.data.id;
-        const txt = await drive.files.export({ fileId: docId, mimeType: 'text/plain' });
-        await drive.files.delete({ fileId: docId }).catch(() => {});
-        results[start + idx] = { page: pageNum, text: typeof txt.data === 'string' ? txt.data : '' };
-      } catch (e) {
-        console.error(`OCR page ${pageNum}:`, e.message);
-        results[start + idx] = { page: pageNum, text: '' };
+  const processPage = async ({ path: imgPath, mime, pageNum }, retryCount = 0) => {
+    try {
+      const up = await drive.files.create({
+        requestBody: {
+          name: `p${pageNum}`,
+          parents: [folderId],
+          mimeType: 'application/vnd.google-apps.document'
+        },
+        media: { mimeType: mime, body: fs.createReadStream(imgPath) },
+        fields: 'id',
+        timeout: 60000
+      });
+
+      const docId = up.data.id;
+
+      // Minimal delay - Drive processes faster with less wait
+      await new Promise(r => setTimeout(r, 200));
+
+      const txt = await drive.files.export({
+        fileId: docId,
+        mimeType: 'text/plain',
+        timeout: 60000
+      });
+
+      // Delete asynchronously without waiting
+      drive.files.delete({ fileId: docId }).catch(() => {});
+
+      return { text: (typeof txt.data === 'string' ? txt.data.trim() : '') };
+    } catch (e) {
+      if (retryCount < MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, 500));
+        return processPage({ path: imgPath, mime, pageNum }, retryCount + 1);
       }
+      return { text: '' };
+    }
+  };
+
+  for (let start = 0; start < pages.length; start += CONCURRENT) {
+    const batch = pages.slice(start, start + CONCURRENT).map(async (page, idx) => {
+      const result = await processPage(page);
+      results[start + idx] = { page: page.pageNum, text: result.text };
     });
+
     await Promise.all(batch);
     done = Math.min(start + CONCURRENT, pages.length);
     onProgress(done);
   }
+
+  // Cleanup folder asynchronously (don't wait)
+  drive.files.delete({ fileId: folderId }).catch(() => {});
+
   return results;
 }
 
-// ─── Clean text ───────────────────────────────────────────────────────────────
+// ─── Clean Text ──────────────────────────────────────────────────────────────
 function cleanText(raw) {
   if (!raw) return [];
-  return raw.split('\n')
-    .map(l => l.trim())
-    .filter(l => l.length >= 2)
-    .filter(l => !/^[\s\.\-\–\—\|_\d،؟!]+$/.test(l));
+
+  return raw
+    .split('\n')
+    .map(l => {
+      let line = l.trim();
+      // Remove excessive whitespace
+      line = line.replace(/\s+/g, ' ');
+      // Remove common OCR artifacts
+      line = line.replace(/[​-‍]/g, '');
+      return line;
+    })
+    .filter(l => l.length > 0);
 }
 
-// ─── Build Word doc ───────────────────────────────────────────────────────────
+// ─── Build Word Document ─────────────────────────────────────────────────────
 async function buildWordDoc(extractedTexts, outputPath) {
   const { Document, Paragraph, TextRun, AlignmentType, PageBreak, convertInchesToTwip } = require('docx');
   const FONT = 'Jameel Noori Nastaleeq';
   const SIZE = 34;
   const NS = { before: 0, after: 0, line: 240, lineRule: 'auto' };
 
-  const makePara = text => new Paragraph({
-    children: [new TextRun({ text, font: FONT, size: SIZE, color: '000000', bold: false, rightToLeft: true })],
+  const makePara = (text) => new Paragraph({
+    children: [
+      new TextRun({
+        text,
+        font: FONT,
+        size: SIZE,
+        color: '000000',
+        bold: false,
+        rightToLeft: true
+      })
+    ],
     alignment: AlignmentType.RIGHT,
     bidirectional: true,
-    spacing: NS,
+    spacing: NS
   });
 
   const children = [];
+
   for (let i = 0; i < extractedTexts.length; i++) {
     if (i > 0) children.push(new Paragraph({ children: [new PageBreak()], spacing: NS }));
     const lines = cleanText(extractedTexts[i].text);
-    if (lines.length === 0) { children.push(makePara(' ')); continue; }
-    for (const line of lines) children.push(makePara(line));
+    if (lines.length === 0) {
+      children.push(makePara(' '));
+      continue;
+    }
+    for (const line of lines) {
+      children.push(makePara(line));
+    }
   }
 
   const doc = new Document({
@@ -287,20 +707,31 @@ async function buildWordDoc(extractedTexts, outputPath) {
         }
       }
     },
-    sections: [{
-      properties: { page: { margin: { top: convertInchesToTwip(1), right: convertInchesToTwip(1), bottom: convertInchesToTwip(1), left: convertInchesToTwip(1) } } },
-      children
-    }]
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: convertInchesToTwip(1),
+              right: convertInchesToTwip(1),
+              bottom: convertInchesToTwip(1),
+              left: convertInchesToTwip(1)
+            }
+          }
+        },
+        children
+      }
+    ]
   });
+
   const { Packer } = require('docx');
   fs.writeFileSync(outputPath, await Packer.toBuffer(doc));
 }
 
-// ─── Convert Route ────────────────────────────────────────────────────────────
+// ─── Convert Endpoint ────────────────────────────────────────────────────────
 app.post('/api/convert', (req, res, next) => {
   const tokenHeader = req.headers['x-tokens'] || req.get('X-Tokens');
   if (!req.session.tokens && !req.session.user && !tokenHeader) {
-    console.log('Auth failed - no tokens. Headers:', req.headers);
     return res.status(401).json({ error: 'Login karo' });
   }
   if (tokenHeader) {
@@ -308,83 +739,566 @@ app.post('/api/convert', (req, res, next) => {
       const tokens = JSON.parse(tokenHeader);
       req.session.tokens = tokens;
     } catch (e) {
-      console.error('Failed to parse tokens from header:', e.message);
+      console.error('Parse error:', e.message);
     }
   }
+  if (req.session.tokens) oauth2Client.setCredentials(req.session.tokens);
   next();
 }, upload.single('pdf'), async (req, res) => {
-  const jobId = uuidv4();
-  res.json({ jobId });
-
-  const update = (step, percent, message) =>
-    progressMap.set(jobId, { step, percent, message, status: 'processing' });
-
-  const filePath = req.file.path;
-  const originalName = req.file.originalname.replace(/\.(pdf|jpg|jpeg|png|webp)$/i, '');
-  const fileMime = req.file.mimetype;
-  const tempDir = path.join('uploads', `tmp_${jobId}`);
-  fs.mkdirSync(tempDir, { recursive: true });
-
   try {
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
-    const { data: { id: folderId } } = await drive.files.create({
-      requestBody: { name: `OCR_${Date.now()}`, mimeType: 'application/vnd.google-apps.folder' },
-      fields: 'id'
-    });
+    if (!req.file) return res.status(400).json({ error: 'File chahiye' });
 
-    let ocrPages = [];
+    const jobId    = uuidv4();
+    const fileMime = req.file.mimetype;
+    const filePath = req.file.path;
+    const tempDir  = path.join(__dirname, 'temp', jobId);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-    if (fileMime === 'application/pdf') {
-      update(1, 5, 'PDF load ho raha hai...');
-      const pdfData = new Uint8Array(fs.readFileSync(filePath));
-      const pdfDoc = await pdfjsLib.getDocument({ data: pdfData, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true }).promise;
-      const totalPages = Math.min(pdfDoc.numPages, 1000); // max 1000
-      console.log(`Pages: ${totalPages}`);
-      update(1, 8, `${totalPages} pages milein. Fast conversion shuru...`);
+    const update = (percent, message) => {
+      progressMap.set(jobId, { percent, message, status: 'processing' });
+    };
 
-      const imagePaths = await convertPagesParallel(pdfData, totalPages, tempDir, update);
-      ocrPages = imagePaths.map((p, i) => ({ ...p, pageNum: i + 1 }));
-    } else {
-      update(1, 20, 'Image ready. OCR shuru...');
-      ocrPages = [{ path: filePath, mime: fileMime, pageNum: 1 }];
-    }
+    (async () => {
+      try {
+        const outputPath = path.join(tempDir, 'output.docx');
 
-    if (ocrPages.length === 0) throw new Error('Koi page process nahi hua');
-    update(2, 47, `${ocrPages.length} pages OCR ke liye ready...`);
+        // ── Word file: extract text directly, re-format with Urdu font ──────
+        if (WORD_MIMES.has(fileMime)) {
+          update(10, '📝 Word file se text nikal raha hai...');
+          const pages = await extractWordText(filePath);
+          try { fs.unlinkSync(filePath); } catch (e) {}
+          update(60, `📄 ${pages.length} pages mili — Word document ban raha hai...`);
+          const texts = pages.map(p => ({ text: p.text }));
+          await buildWordDoc(texts, outputPath);
 
-    const extractedTexts = await ocrBatch(drive, folderId, ocrPages, done => {
-      update(3, Math.round(47 + (done / ocrPages.length) * 43), `OCR: ${done} / ${ocrPages.length} pages...`);
-    });
+        // ── PDF / Image: existing OCR pipeline ───────────────────────────────
+        } else {
+          let imagePaths;
 
-    await drive.files.delete({ fileId: folderId }).catch(() => {});
-    update(4, 93, 'Word file ban rahi hai...');
+          if (IMG_MIMES.has(fileMime)) {
+            // Single image — treat as 1-page document; move to tempDir
+            update(5, '🖼️ Image loaded — OCR shuru...');
+            const imgDest = path.join(tempDir, 'page_1' + path.extname(req.file.originalname || '.png'));
+            fs.renameSync(filePath, imgDest);
+            imagePaths = [{ path: imgDest, mime: fileMime, pageNum: 1 }];
+          } else {
+            const pdfData = fs.readFileSync(filePath);
+            fs.unlinkSync(filePath);
+            const pdfDoc = await pdfjsLib.getDocument({
+              data: new Uint8Array(pdfData),
+              useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true
+            }).promise;
+            const totalPages = pdfDoc.numPages;
+            update(2, `📄 PDF loaded: ${totalPages} pages`);
+            imagePaths = await convertPagesParallel(pdfData, totalPages, tempDir, (pct, msg) => update(pct, msg));
+          }
 
-    const outputPath = path.join('uploads', `${jobId}_out.docx`);
-    await buildWordDoc(extractedTexts, outputPath);
+          update(48, '🚀 Uploading to Google Drive...');
+          if (!req.session.tokens || !req.session.tokens.access_token) {
+            throw new Error('Google authorization required. Please login again.');
+          }
 
-    progressMap.set(jobId, {
-      status: 'done', percent: 100,
-      message: 'Tayyar! Word file download karo.',
-      downloadUrl: `/api/download/${jobId}/${encodeURIComponent(originalName)}`
-    });
+          const drive = google.drive({ version: 'v3', auth: oauth2Client });
+          const folder = await drive.files.create({
+            requestBody: { name: `OCR-${jobId}`, mimeType: 'application/vnd.google-apps.folder' },
+            fields: 'id', timeout: 30000
+          });
+          const folderId = folder.data.id;
+          console.log(`✅ Drive folder: ${folderId}`);
 
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    try { fs.unlinkSync(filePath); } catch {}
+          const withPageNum = imagePaths.map((img, i) => ({ ...img, pageNum: i + 1 }));
+          const ocrResults  = await ocrBatch(drive, folderId, withPageNum, (done) => {
+            update(50 + Math.round((done / withPageNum.length) * 38), `🔤 OCR: ${done}/${withPageNum.length} pages`);
+          });
 
-  } catch (err) {
-    console.error('Error:', err);
-    progressMap.set(jobId, { status: 'error', percent: 0, message: `Error: ${err.message}` });
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-    try { fs.unlinkSync(filePath); } catch {}
+          const texts = new Array(withPageNum.length).fill({ text: '' });
+          ocrResults.forEach(({ page, text }) => {
+            if (page > 0 && page <= texts.length) texts[page - 1] = { text };
+          });
+          console.log(`OCR completed: ${texts.filter(t => t.text).length}/${texts.length} pages`);
+
+          update(90, '✍️ Building Word document...');
+          await buildWordDoc(texts, outputPath);
+        }
+
+        update(97, '✅ Finalizing...');
+
+        const downloadUrl = `/download/${jobId}/output.docx`;
+        const fileSize = fs.statSync(path.join(tempDir, 'output.docx')).size;
+
+        progressMap.set(jobId, {
+          percent: 100,
+          message: `✅ Complete! (${(fileSize / 1024).toFixed(1)} KB)`,
+          status: 'done',
+          downloadUrl
+        });
+
+        console.log(`Convert completed: ${jobId} - ${fileSize} bytes`);
+
+        setTimeout(() => {
+          try {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+          } catch (e) {
+            console.error('Cleanup error:', e.message);
+          }
+        }, 300000);
+      } catch (e) {
+        console.error('Convert error:', e.message);
+        progressMap.set(jobId, {
+          percent: 0,
+          message: `❌ Error: ${e.message}`,
+          status: 'error'
+        });
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (err) {
+          console.error('Cleanup error:', err.message);
+        }
+      }
+    })();
+
+    res.json({ jobId });
+  } catch (e) {
+    console.error('Convert start error:', e);
+    res.status(500).json({ error: 'Convert start fail' });
   }
 });
 
-// ─── Download ─────────────────────────────────────────────────────────────────
-app.get('/api/download/:jobId/:filename', (req, res) => {
-  const fp = path.join('uploads', `${req.params.jobId}_out.docx`);
-  if (!fs.existsSync(fp)) return res.status(404).json({ error: 'File nahi mili' });
-  res.download(fp, `${decodeURIComponent(req.params.filename)}_urdu.docx`, () => fs.unlink(fp, () => {}));
+// ─── Download Endpoint ───────────────────────────────────────────────────────
+app.get('/download/:jobId/:filename', (req, res) => {
+  const { jobId, filename } = req.params;
+  const file = path.join(__dirname, 'temp', jobId, filename);
+
+  if (!fs.existsSync(file)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  res.download(file, filename, (err) => {
+    if (err) console.error('Download error:', err);
+  });
 });
 
-fs.mkdirSync('uploads', { recursive: true });
-app.listen(PORT, () => console.log(`✅ Server: http://localhost:${PORT}`));
+// ═══════════════════════════════════════════════════════════════════════════
+// فہارس — Rule-Based Urdu NER (free, no API key needed)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Honorific prefixes that appear before personality names in Urdu text
+const HONORIFICS = [
+  'حضرت','مولانا','علامہ','شیخ','امیر','حافظ','قاری','میر','مرزا','خواجہ',
+  'ڈاکٹر','پروفیسر','سر','راجہ','ملک','سید','ابن','مولوی','پیر','میاں',
+  'چودھری','بیگم','خاتون','منشی','لالہ','رانا','سردار','نواب','بابا','آغا',
+  'قاضی','مفتی','محدث','فقیہ','عارف','غوث','قطب','خلیفہ','صاحب','جناب',
+  'برادر','والد','والدہ','استاد','شاگرد','امام','خطیب','مشیر','وزیر',
+  'جنرل','کرنل','کیپٹن','میجر','لیفٹیننٹ'
+];
+
+// Urdu stop words — don't include these as part of a name
+const NAME_STOP = new Set([
+  'کا','کی','کے','میں','سے','پر','کو','نے','ہے','ہیں','تھا','تھی','تھے',
+  'اور','یا','لیکن','مگر','بلکہ','جو','جب','جس','جہاں','جن','کہ','تو',
+  'بھی','ہی','تک','ابھی','اب','پھر','وہ','یہ','اس','ان','اپنا','اپنی',
+  'اپنے','اس','ان','جیسے','جیسا','جیسی','ایسے','ایسا','ایسی','بڑا','بڑی',
+  'چھوٹا','پہلا','پہلی','آخری','نہیں','نہ','مت','گیا','آیا','کیا','ہوا',
+  'ہوئی','ہوئے','رہا','رہی','رہے','لیا','دیا','مل','کر','ہو','جا','آ',
+]);
+
+// Well-known places (cities, countries, regions)
+const KNOWN_PLACES = new Set([
+  // Pakistan
+  'لاہور','کراچی','اسلام آباد','پشاور','کوئٹہ','ملتان','فیصل آباد',
+  'راولپنڈی','سیالکوٹ','گوجرانوالہ','حیدرآباد','سکھر','لاڑکانہ',
+  'بہاولپور','سرگودھا','شیخوپورہ','جھنگ','گجرات','قصور','مردان',
+  'پاکستان','پنجاب','سندھ','بلوچستان','سرحد','خیبر','کشمیر','آزاد کشمیر',
+  // India
+  'دہلی','ممبئی','کلکتہ','چنئی','آگرہ','لکھنؤ','علی گڑھ','حیدرآباد دکن',
+  'الہ آباد','بنارس','پٹنہ','امرتسر','جالندھر','ہندوستان','بھارت','انڈیا',
+  // Arab / Middle East
+  'مکہ','مدینہ','بغداد','دمشق','قاہرہ','استنبول','تہران','بیروت',
+  'عرب','سعودی عرب','ایران','عراق','شام','مصر','ترکی','اردن','یمن',
+  'فلسطین','اسرائیل','کویت','بحرین','قطر','عمان','امارات',
+  // Central Asia & Other
+  'افغانستان','ایران','روس','چین','برطانیہ','امریکہ','فرانس','جرمنی',
+  'کابل','قندہار','ہرات','بخارا','سمرقند','تاشقند','ترکستان',
+  // Institutions / Organizations
+  'پاکستان','حکومت','وزارت','یونیورسٹی','کالج','اسکول','مدرسہ','دار الحکوم',
+]);
+
+// Words with these suffixes are likely place names
+const PLACE_SUFFIXES = ['آباد','پور','گڑھ','نگر','وال','شہر','پوری','کوٹ','گاہ'];
+
+// Words before a place name
+const PLACE_PREFIXES = new Set([
+  'شہر','ضلع','صوبہ','ریاست','قصبہ','گاؤں','تحصیل','موضع','مقام','علاقہ',
+  'ملک','خطہ','دارالحکومت','دار','بندرگاہ','دریا','پہاڑ','ندی','وادی',
+]);
+
+// Known religious / classic texts
+const KNOWN_BOOKS = [
+  'قرآن مجید','قرآن کریم','قرآن','بائبل','توریت','انجیل','زبور',
+  'صحیح بخاری','صحیح مسلم','سنن ترمذی','سنن ابن ماجہ','سنن ابو داؤد',
+  'موطا امام مالک','حدیث','شاہنامہ','گلستان سعدی','بوستان سعدی',
+  'دیوان غالب','دیوان اقبال','بانگ درا','بال جبریل','ارمغان حجاز',
+  'شکوہ','جواب شکوہ','اسرار خودی','رموز بے خودی','پس چہ باید کرد',
+  'میر کی غزلیں','کلیات میر','رحمت اللہ علیہ','تاریخ ابن خلدون',
+];
+
+// Patterns that signal a book name follows
+const BOOK_SIGNALS = [
+  'کتاب','دیوان','رسالہ','تذکرہ','تاریخ','مجموعہ','نامہ','خزانہ',
+  'گنجینہ','مقالہ','دستاویز','ناول','افسانہ','نظم','غزل','قصیدہ',
+  'مثنوی','مرثیہ','مجلہ','رسالہ','جریدہ','اخبار',
+];
+
+// Fixed set of language names
+const LANGUAGE_NAMES = new Set([
+  'اردو','عربی','فارسی','پنجابی','سندھی','بلوچی','پشتو','ہندی',
+  'انگریزی','ترکی','ہندوستانی','گجراتی','بنگالی','تامل','تیلگو',
+  'چینی','روسی','فرانسیسی','جرمن','جاپانی','کوریائی','ملائی',
+  'سنسکرت','پالی','تبتی','کردی','دری','سواحلی','ہیبرو','لاطینی',
+  'یونانی','اطالوی','ہسپانوی','پرتگیزی','ڈچ','سویڈش','ناروے',
+]);
+
+// ─── Extract entities from a single page's text (rule-based) ─────────────────
+function extractFromPage(text, pageNum) {
+  if (!text || text.length < 10) return null;
+
+  const words = text.split(/\s+/).map(w => w.replace(/[۔،؟!:؛\-\.,"'()[\]{}]/g, '').trim()).filter(Boolean);
+  const found = { شخصیات: new Set(), اماکن: new Set(), کتابیں: new Set(), زبانیں: new Set() };
+
+  // ── 1. Personalities via honorifics ──────────────────────────────────────
+  for (let i = 0; i < words.length; i++) {
+    if (HONORIFICS.includes(words[i])) {
+      const parts = [words[i]];
+      for (let j = i + 1; j <= Math.min(i + 4, words.length - 1); j++) {
+        const w = words[j];
+        if (!w || NAME_STOP.has(w) || HONORIFICS.includes(w) || w.length < 2) break;
+        parts.push(w);
+        if (parts.length >= 4) break;
+      }
+      if (parts.length >= 2) found.شخصیات.add(parts.join(' '));
+    }
+  }
+
+  // ── 2. Known places (exact match in text) ────────────────────────────────
+  for (const place of KNOWN_PLACES) {
+    if (text.includes(place)) found.اماکن.add(place);
+  }
+
+  // ── 3. Place-suffix detection (e.g. گوجرانوالہ, فیصل آباد suffix) ───────
+  for (const w of words) {
+    for (const sfx of PLACE_SUFFIXES) {
+      if (w.endsWith(sfx) && w.length > sfx.length + 1 && !KNOWN_PLACES.has(w)) {
+        found.اماکن.add(w);
+      }
+    }
+  }
+
+  // ── 4. Place-prefix detection (e.g. "شہر لاہور", "ضلع سرگودھا") ──────────
+  for (let i = 0; i < words.length - 1; i++) {
+    if (PLACE_PREFIXES.has(words[i]) && words[i + 1] && words[i + 1].length > 2 && !NAME_STOP.has(words[i + 1])) {
+      found.اماکن.add(`${words[i]} ${words[i + 1]}`);
+    }
+  }
+
+  // ── 5. Known books (exact match) ─────────────────────────────────────────
+  for (const book of KNOWN_BOOKS) {
+    if (text.includes(book)) found.کتابیں.add(book);
+  }
+
+  // ── 6. Book-signal detection (e.g. "کتاب المنطق", "دیوان غالب") ──────────
+  for (let i = 0; i < words.length - 1; i++) {
+    if (BOOK_SIGNALS.includes(words[i])) {
+      const parts = [];
+      for (let j = i + 1; j <= Math.min(i + 4, words.length - 1); j++) {
+        const w = words[j];
+        if (!w || NAME_STOP.has(w) || w.length < 2) break;
+        parts.push(w);
+      }
+      if (parts.length >= 1) found.کتابیں.add(`${words[i]} ${parts.join(' ')}`);
+    }
+  }
+
+  // ── 7. Languages ──────────────────────────────────────────────────────────
+  for (const lang of LANGUAGE_NAMES) {
+    if (text.includes(lang)) found.زبانیں.add(lang);
+  }
+
+  return found;
+}
+
+// ─── Aggregate entities from all pages ───────────────────────────────────────
+function buildEntityIndex(pages) {
+  // entity name → Set of page numbers
+  const index = { شخصیات: {}, اماکن: {}, کتابیں: {}, زبانیں: {} };
+
+  for (const { pageNum, text } of pages) {
+    const found = extractFromPage(text, pageNum);
+    if (!found) continue;
+
+    for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
+      for (const name of found[cat]) {
+        if (!name || name.trim().length < 2) continue;
+        const key = name.trim();
+        if (!index[cat][key]) index[cat][key] = new Set();
+        index[cat][key].add(pageNum);
+      }
+    }
+  }
+
+  // Convert to sorted arrays
+  const toArr = (map) =>
+    Object.entries(map)
+      .map(([name, pgSet]) => ({ name, pages: [...pgSet].sort((a, b) => a - b) }))
+      .sort((a, b) => a.pages[0] - b.pages[0]); // sort by first appearance
+
+  return {
+    شخصیات: toArr(index.شخصیات),
+    اماکن:  toArr(index.اماکن),
+    کتابیں: toArr(index.کتابیں),
+    زبانیں: toArr(index.زبانیں),
+  };
+}
+
+// ─── Urdu numerals helper ─────────────────────────────────────────────────────
+function toUrduNum(n) {
+  return String(n).replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+}
+
+// ─── Build فہارس Word Document ────────────────────────────────────────────────
+async function buildFiharisDoc(entities) {
+  const {
+    Document, Paragraph, TextRun, Table, TableRow, TableCell,
+    AlignmentType, WidthType, VerticalAlign, BorderStyle, Packer,
+    convertInchesToTwip
+  } = require('docx');
+
+  const FONT  = 'Jameel Noori Nastaleeq';
+  const SZ_TITLE   = 56;
+  const SZ_SECTION = 40;
+  const SZ_BODY    = 24;
+
+  const border = { color: '555555', size: 4, space: 0, style: BorderStyle.SINGLE };
+  const borders = { top: border, bottom: border, left: border, right: border, insideH: border, insideV: border };
+
+  const rtlText = (text, size, bold = false) =>
+    new TextRun({ text, font: FONT, size, bold, rightToLeft: true });
+
+  const cell = (text, widthPct, bold = false, fill = 'FFFFFF') =>
+    new TableCell({
+      width: { size: widthPct, type: WidthType.PERCENTAGE },
+      shading: { fill },
+      verticalAlign: VerticalAlign.CENTER,
+      margins: { top: 60, bottom: 60, left: 80, right: 80 },
+      children: [new Paragraph({
+        alignment: AlignmentType.CENTER,
+        bidirectional: true,
+        children: [rtlText(String(text), SZ_BODY, bold)]
+      })]
+    });
+
+  const makeTable = (colDefs, dataRows) =>
+    new Table({
+      borders,
+      bidi: true,
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        // Header row
+        new TableRow({
+          tableHeader: true,
+          children: colDefs.map(([lbl, pct]) => cell(lbl, pct, true, 'D8D8D8'))
+        }),
+        // Data rows
+        ...dataRows.map((cells, ri) =>
+          new TableRow({
+            children: cells.map(([txt, pct]) => cell(txt, pct, false, ri % 2 === 0 ? 'FFFFFF' : 'F7F7F7'))
+          })
+        )
+      ]
+    });
+
+  const gap = (after = 160) => new Paragraph({ spacing: { after } });
+
+  const sectionTitle = (text) => new Paragraph({
+    alignment: AlignmentType.RIGHT,
+    bidirectional: true,
+    spacing: { before: 240, after: 100 },
+    children: [rtlText(`• ${text}`, SZ_SECTION, true)]
+  });
+
+  const children = [
+    // Main Title — فہارس
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      bidirectional: true,
+      spacing: { after: 360 },
+      children: [rtlText('فہارس', SZ_TITLE, true)]
+    })
+  ];
+
+  const addSection = (title, colDefs, rows) => {
+    if (rows.length === 0) return;
+    children.push(sectionTitle(title));
+    children.push(gap(80));
+    children.push(makeTable(colDefs, rows));
+    children.push(gap(240));
+  };
+
+  // فہرست شخصیات
+  addSection(
+    'فہرست شخصیات',
+    [['نمبر شمار', 15], ['نام شخصیت', 55], ['صفحہ نمبر', 30]],
+    entities.شخصیات.map((e, i) => [
+      [toUrduNum(i + 1) + '۔', 15],
+      [e.name, 55],
+      [e.pages.map(toUrduNum).join('، '), 30]
+    ])
+  );
+
+  // فہرست اماکن
+  addSection(
+    'فہرست اماکن',
+    [['نمبر شمار', 15], ['نام جگہ', 55], ['صفحہ نمبر', 30]],
+    entities.اماکن.map((e, i) => [
+      [toUrduNum(i + 1) + '۔', 15],
+      [e.name, 55],
+      [e.pages.map(toUrduNum).join('، '), 30]
+    ])
+  );
+
+  // فہرست کتابیں
+  addSection(
+    'فہرست کتابیں',
+    [['نمبر شمار', 15], ['نام کتاب', 55], ['صفحہ نمبر', 30]],
+    entities.کتابیں.map((e, i) => [
+      [toUrduNum(i + 1) + '۔', 15],
+      [e.name, 55],
+      [e.pages.map(toUrduNum).join('، '), 30]
+    ])
+  );
+
+  // فہرست زبانیں
+  addSection(
+    'فہرست زبانیں',
+    [['نمبر شمار', 15], ['زبان کا نام', 55], ['صفحہ نمبر', 30]],
+    entities.زبانیں.map((e, i) => [
+      [toUrduNum(i + 1) + '۔', 15],
+      [e.name, 55],
+      [e.pages.map(toUrduNum).join('، '), 30]
+    ])
+  );
+
+  const doc = new Document({
+    sections: [{
+      properties: {
+        page: {
+          margin: {
+            top: convertInchesToTwip(1), right: convertInchesToTwip(1),
+            bottom: convertInchesToTwip(1), left: convertInchesToTwip(1)
+          }
+        }
+      },
+      children
+    }]
+  });
+
+  return Packer.toBuffer(doc);
+}
+
+// ─── Generate فہارس Endpoint ──────────────────────────────────────────────────
+app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
+  try {
+    const { pdfId } = req.body;
+    if (!pdfId) return res.status(400).json({ error: 'pdfId chahiye' });
+
+    const cached = pdfCache.get(pdfId);
+    if (!cached) return res.status(404).json({ error: 'PDF cache expire — dobara upload karo' });
+
+    const jobId = uuidv4();
+    const update = (pct, msg) => progressMap.set(jobId, { percent: pct, message: msg, status: 'processing' });
+
+    (async () => {
+      try {
+        const total = cached.pages.length;
+        update(10, `📚 ${total} pages analyze ho rahi hain...`);
+
+        // Process in chunks so we can emit progress
+        const CHUNK = 20;
+        const index = { شخصیات: {}, اماکن: {}, کتابیں: {}, زبانیں: {} };
+
+        for (let i = 0; i < cached.pages.length; i += CHUNK) {
+          const slice = cached.pages.slice(i, i + CHUNK);
+          for (const { pageNum, text } of slice) {
+            const found = extractFromPage(text, pageNum);
+            if (!found) continue;
+            for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
+              for (const name of found[cat]) {
+                const key = name.trim();
+                if (!key || key.length < 2) continue;
+                if (!index[cat][key]) index[cat][key] = new Set();
+                index[cat][key].add(pageNum);
+              }
+            }
+          }
+          const done = Math.min(i + CHUNK, total);
+          update(10 + Math.round((done / total) * 70), `🔍 Analyzing: ${done}/${total} pages`);
+        }
+
+        update(82, '📝 فہارس document ban rahi hai...');
+
+        const toArr = (map) =>
+          Object.entries(map)
+            .map(([name, pgSet]) => ({ name, pages: [...pgSet].sort((a, b) => a - b) }))
+            .sort((a, b) => a.pages[0] - b.pages[0]);
+
+        const entities = {
+          شخصیات: toArr(index.شخصیات),
+          اماکن:  toArr(index.اماکن),
+          کتابیں: toArr(index.کتابیں),
+          زبانیں: toArr(index.زبانیں),
+        };
+
+        const buf = await buildFiharisDoc(entities);
+
+        const tempDir = path.join(__dirname, 'temp', jobId);
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        fs.writeFileSync(path.join(tempDir, 'fiharis.docx'), buf);
+
+        const stats = {
+          شخصیات: entities.شخصیات.length,
+          اماکن:  entities.اماکن.length,
+          کتابیں: entities.کتابیں.length,
+          زبانیں: entities.زبانیں.length,
+        };
+
+        progressMap.set(jobId, {
+          percent: 100,
+          message: '✅ فہارس تیار!',
+          status: 'done',
+          downloadUrl: `/download/${jobId}/fiharis.docx`,
+          stats
+        });
+
+        setTimeout(() => {
+          try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+        }, 1800000);
+
+      } catch (e) {
+        console.error('generate-index error:', e.message);
+        progressMap.set(jobId, { percent: 0, message: `❌ ${e.message}`, status: 'error' });
+      }
+    })();
+
+    res.json({ jobId });
+  } catch (e) {
+    res.status(500).json({ error: 'Index start fail: ' + e.message });
+  }
+});
+
+// ─── Health Check ────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ─── Server Start ────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Frontend: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+});

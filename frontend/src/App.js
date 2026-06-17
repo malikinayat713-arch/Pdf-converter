@@ -7,19 +7,54 @@ const API = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState('convert'); // 'convert' or 'search'
-  const [file, setFile] = useState(null);
+  const [mode, setMode] = useState('convert');
   const [dragOver, setDragOver] = useState(false);
-  const [progress, setProgress] = useState(null);
-  const [downloadUrl, setDownloadUrl] = useState(null);
-  const [error, setError] = useState(null);
+
+  // فہارس State
+  const [fiharisFile, setFiharisFile] = useState(null);
+  const [fiharisPdfId, setFiharisPdfId] = useState(null);
+  const [fiharisUploadProg, setFiharisUploadProg] = useState(null);
+  const [fiharisGenProg, setFiharisGenProg] = useState(null);
+  const [fiharisUrl, setFiharisUrl] = useState(null);
+  const [fiharisStats, setFiharisStats] = useState(null);
+  const [fiharisError, setFiharisError] = useState(null);
+  const [fiharisUploadTime, setFiharisUploadTime] = useState(0);
+  const [fiharisGenTime, setFiharisGenTime] = useState(0);
+  const fiharisFileRef = useRef();
+  const fiharisUploadEsRef = useRef();
+  const fiharisGenEsRef = useRef();
+  const fiharisUploadTimerRef = useRef();
+  const fiharisGenTimerRef = useRef();
+  const fiharisUploadStartRef = useRef(null);
+  const fiharisGenStartRef = useRef(null);
+
+  // Convert State
+  const [convertFile, setConvertFile] = useState(null);
+  const [convertProgress, setConvertProgress] = useState(null);
+  const [convertUrl, setConvertUrl] = useState(null);
+  const [convertError, setConvertError] = useState(null);
+  const [convertTime, setConvertTime] = useState(0);
+  const convertFileRef = useRef();
+  const esRef = useRef();
+  const convertStartTimeRef = useRef(null);
+  const convertTimerRef = useRef(null);
+
+  // Search State
+  const [searchFile, setSearchFile] = useState(null);
   const [pdfId, setPdfId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [searching, setSearching] = useState(false);
-  const fileRef = useRef();
-  const esRef = useRef();
+  const [searchError, setSearchError] = useState(null);
+  const [searchProgress, setSearchProgress] = useState(null);
+  const [searchTime, setSearchTime] = useState(0);
+  const [downloading, setDownloading] = useState(null); // 'pdf' | 'report' | null
+  const searchFileRef = useRef();
+  const searchStartTimeRef = useRef(null);
+  const searchTimerRef = useRef(null);
+  const searchEsRef = useRef();
 
+  // Auth Check
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.get('login') === 'success') {
@@ -32,6 +67,7 @@ export default function App() {
           if (tokenData) {
             const tokens = JSON.parse(atob(tokenData));
             localStorage.setItem('tokens', JSON.stringify(tokens));
+            console.log('✅ Tokens saved:', Object.keys(tokens));
           }
           setUser(user);
           window.history.replaceState({}, '', '/');
@@ -39,413 +75,1024 @@ export default function App() {
           return;
         }
       } catch (e) {
-        console.error('Failed to parse user data:', e);
+        console.error('Login error:', e);
       }
     }
+
     const savedUser = localStorage.getItem('user');
+    const savedTokens = localStorage.getItem('tokens');
     if (savedUser) {
       setUser(JSON.parse(savedUser));
-      setLoading(false);
-    } else {
-      axios.get(`${API}/auth/user`, { withCredentials: true })
-        .then(r => setUser(r.data.loggedIn ? r.data.user : null))
-        .catch(() => setUser(null))
-        .finally(() => setLoading(false));
+      console.log('✅ User loaded from storage');
     }
+    if (savedTokens) {
+      console.log('✅ Tokens loaded from storage');
+    }
+
+    axios
+      .get(`${API}/auth/user`, { withCredentials: true })
+      .then(r => {
+        if (r.data.loggedIn && r.data.user) setUser(r.data.user);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
   const logout = async () => {
     await axios.post(`${API}/auth/logout`, {}, { withCredentials: true });
     localStorage.removeItem('user');
-    setUser(null); reset();
+    localStorage.removeItem('tokens');
+    setUser(null);
   };
 
-  const extractPdf = async () => {
-    if (!file) return;
-    setError(null);
-    const fd = new FormData(); fd.append('pdf', file);
+  // Format time helper
+  const formatTime = (seconds) => {
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs}s`;
+  };
+
+  // Calculate estimated remaining time
+  const getTimeRemaining = (elapsed, percent) => {
+    if (percent === 0) return 0;
+    const totalEstimated = (elapsed / percent) * 100;
+    return Math.max(0, totalEstimated - elapsed);
+  };
+
+  // ── Convert Functions ──
+  const handleDrop = useCallback(e => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer.files[0];
+    const CONVERT_TYPES = ['application/pdf','image/jpeg','image/jpg','image/png','image/webp',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/msword'];
+    const DOC_TYPES = ['application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/msword'];
+
+    if (mode === 'convert') {
+      if (CONVERT_TYPES.includes(f?.type)) {
+        setConvertFile(f);
+        setConvertError(null);
+      } else {
+        setConvertError('PDF، Word یا Image chahiye');
+      }
+    } else if (mode === 'search') {
+      if (DOC_TYPES.includes(f?.type)) {
+        setSearchFile(f);
+        setSearchError(null);
+      } else {
+        setSearchError('PDF یا Word file chahiye');
+      }
+    } else if (mode === 'fiharis') {
+      if (DOC_TYPES.includes(f?.type)) {
+        setFiharisFile(f);
+        setFiharisError(null);
+      } else {
+        setFiharisError('PDF یا Word file چاہیے');
+      }
+    }
+  }, [mode]);
+
+  const convert = async () => {
+    if (!convertFile) return;
+    setConvertError(null);
+    setConvertUrl(null);
+    setConvertTime(0);
+    setConvertProgress({ percent: 0, message: 'Shuru ho raha hai...' });
+
+    convertStartTimeRef.current = Date.now();
+
+    // Timer interval
+    if (convertTimerRef.current) clearInterval(convertTimerRef.current);
+    convertTimerRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - convertStartTimeRef.current) / 1000);
+      setConvertTime(elapsed);
+    }, 1000);
+
+    const fd = new FormData();
+    fd.append('pdf', convertFile);
+
     try {
       const config = { withCredentials: true };
-      const tokens = localStorage.getItem('tokens');
-      if (tokens) config.headers = { 'X-Tokens': tokens };
-      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, config);
-      setPdfId(data.pdfId);
-      setError(null);
+      const tokenStr = localStorage.getItem('tokens');
+      if (tokenStr) {
+        try {
+          const tokens = JSON.parse(tokenStr);
+          config.headers = { 'X-Tokens': JSON.stringify(tokens) };
+          console.log('✅ Tokens sent to convert endpoint');
+        } catch (e) {
+          console.error('Token parse error:', e);
+        }
+      } else {
+        console.warn('⚠️ No tokens found in storage');
+      }
+
+      const { data } = await axios.post(`${API}/api/convert`, fd, config);
+
+      if (esRef.current) esRef.current.close();
+      const es = new EventSource(`${API}/api/progress/${data.jobId}`);
+      esRef.current = es;
+
+      es.onmessage = e => {
+        const d = JSON.parse(e.data);
+        setConvertProgress({ percent: d.percent, message: d.message });
+        if (d.status === 'done') {
+          clearInterval(convertTimerRef.current);
+          setConvertUrl(d.downloadUrl);
+          es.close();
+        }
+        if (d.status === 'error') {
+          clearInterval(convertTimerRef.current);
+          setConvertError(d.message);
+          es.close();
+        }
+      };
+      es.onerror = () => {
+        clearInterval(convertTimerRef.current);
+        es.close();
+      };
     } catch (e) {
-      setError(e.response?.data?.error || 'PDF extract fail');
+      clearInterval(convertTimerRef.current);
+      setConvertError(e.response?.data?.error || 'Error');
+      setConvertProgress(null);
+    }
+  };
+
+  const uploadForSearch = async () => {
+    if (!searchFile) {
+      setSearchError('PDF select karo pehle');
+      return;
+    }
+    setSearchError(null);
+    setSearchProgress({ percent: 0, message: 'Preparing...' });
+    setSearchTime(0);
+    searchStartTimeRef.current = Date.now();
+
+    // Timer
+    if (searchTimerRef.current) clearInterval(searchTimerRef.current);
+    searchTimerRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - searchStartTimeRef.current) / 1000);
+      setSearchTime(elapsed);
+    }, 1000);
+
+    const fd = new FormData();
+    fd.append('pdf', searchFile);
+
+    try {
+      const config = { withCredentials: true };
+      const tokenStr = localStorage.getItem('tokens');
+      if (tokenStr) {
+        try {
+          const tokens = JSON.parse(tokenStr);
+          config.headers = { 'X-Tokens': JSON.stringify(tokens) };
+        } catch (e) {
+          console.error('Token parse error:', e);
+        }
+      }
+
+      setSearchProgress({ percent: 5, message: '📤 PDF upload ho rahi hai...' });
+
+      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, config);
+
+      // Listen for real progress — only switch to the search UI when the
+      // backend reports "done" (image PDFs run OCR which can take a while).
+      if (searchEsRef.current) searchEsRef.current.close();
+      const es = new EventSource(`${API}/api/progress/${data.jobId}`);
+      searchEsRef.current = es;
+
+      es.onmessage = e => {
+        const d = JSON.parse(e.data);
+        setSearchProgress({ percent: d.percent, message: d.message });
+        if (d.status === 'done') {
+          clearInterval(searchTimerRef.current);
+          setPdfId(d.pdfId || data.pdfId);
+          setSearchProgress(null);
+          es.close();
+        } else if (d.status === 'error') {
+          clearInterval(searchTimerRef.current);
+          setSearchError(d.message || 'Extract fail');
+          setSearchProgress(null);
+          es.close();
+        }
+      };
+      es.onerror = () => {
+        clearInterval(searchTimerRef.current);
+        es.close();
+      };
+    } catch (e) {
+      clearInterval(searchTimerRef.current);
+      const errorMsg = e.response?.data?.error || e.message || 'Upload fail';
+      setSearchError(errorMsg);
+      setSearchProgress(null);
     }
   };
 
   const search = async () => {
     if (!pdfId || !searchTerm.trim()) return;
     setSearching(true);
+
     try {
       const config = { withCredentials: true };
-      const tokens = localStorage.getItem('tokens');
-      if (tokens) config.headers = { 'X-Tokens': tokens };
-      const { data } = await axios.post(`${API}/api/pdf/search`,
-        { pdfId, searchTerm, caseSensitive: false, wholeWord: false },
-        config);
+      const tokenStr = localStorage.getItem('tokens');
+      if (tokenStr) {
+        try {
+          const tokens = JSON.parse(tokenStr);
+          config.headers = { 'X-Tokens': JSON.stringify(tokens) };
+        } catch (e) {
+          console.error('Token parse error:', e);
+        }
+      }
+
+      const { data } = await axios.post(`${API}/api/pdf/search`, {
+        pdfId,
+        searchTerm,
+        caseSensitive: false
+      }, config);
+
       setSearchResults(data);
-      setError(null);
+      setSearchError(null);
     } catch (e) {
-      setError(e.response?.data?.error || 'Search fail');
+      setSearchError(e.response?.data?.error || 'Search fail');
       setSearchResults(null);
     } finally {
       setSearching(false);
     }
   };
 
-  const handleDrop = useCallback(e => {
-    e.preventDefault(); setDragOver(false);
-    const f = e.dataTransfer.files[0];
-    const ok = ['application/pdf','image/jpeg','image/jpg','image/png','image/webp'];
-    if (ok.includes(f?.type)) { setFile(f); setError(null); }
-    else setError('Sirf PDF, JPG ya PNG upload karo');
-  }, []);
-
-  const handleFile = e => {
-    const f = e.target.files[0];
-    if (f) { setFile(f); setError(null); setDownloadUrl(null); setProgress(null); }
+  // Build auth config for download endpoints (blob response)
+  const blobConfig = () => {
+    const config = { withCredentials: true, responseType: 'blob' };
+    const tokenStr = localStorage.getItem('tokens');
+    if (tokenStr) {
+      try {
+        config.headers = { 'X-Tokens': JSON.stringify(JSON.parse(tokenStr)) };
+      } catch (e) {}
+    }
+    return config;
   };
 
-  const convert = async () => {
-    if (!file) return;
-    setError(null); setDownloadUrl(null);
-    setProgress({ step: 1, percent: 0, message: 'Shuru ho raha hai...', status: 'processing' });
-    const fd = new FormData(); fd.append('pdf', file);
+  const triggerDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  // Read the actual error message from a blob error response
+  const readBlobError = async (e) => {
     try {
-      const config = { withCredentials: true };
-      const tokens = localStorage.getItem('tokens');
-      if (tokens) config.headers = { 'X-Tokens': tokens };
-      const { data } = await axios.post(`${API}/api/convert`, fd, config);
-      if (esRef.current) esRef.current.close();
-      const es = new EventSource(`${API}/api/progress/${data.jobId}`);
-      esRef.current = es;
-      es.onmessage = e => {
-        const d = JSON.parse(e.data);
-        setProgress(d);
-        if (d.status === 'done') { setDownloadUrl(d.downloadUrl); es.close(); }
-        if (d.status === 'error') { setError(d.message); es.close(); }
-      };
-      es.onerror = () => es.close();
+      if (e.response?.data instanceof Blob) {
+        const text = await e.response.data.text();
+        const json = JSON.parse(text);
+        return json.error || text;
+      }
+    } catch (_) {}
+    return e.response?.data?.error || e.message || 'Unknown error';
+  };
+
+  // Download a PDF containing only the pages where the word was found
+  const downloadFilteredPdf = async () => {
+    if (!searchResults || searchResults.results.length === 0) return;
+    setDownloading('pdf');
+    setSearchError(null);
+    try {
+      const pages = searchResults.results.map(r => r.pageNum);
+      const { data } = await axios.post(`${API}/api/pdf/create-filtered`, { pdfId, pages }, blobConfig());
+      triggerDownload(new Blob([data], { type: 'application/pdf' }), `${searchTerm}-pages.pdf`);
     } catch (e) {
-      setError(e.response?.data?.error || 'Kuch masla aaya, dobara try karo');
-      setProgress(null);
+      const msg = await readBlobError(e);
+      setSearchError('PDF error: ' + msg);
+    } finally {
+      setDownloading(null);
     }
   };
 
-  const reset = () => {
-    setFile(null); setProgress(null); setDownloadUrl(null); setError(null);
-    if (esRef.current) esRef.current.close();
+  // Download a Word report detailing where the word appears
+  const downloadReport = async () => {
+    if (!searchResults || searchResults.results.length === 0) return;
+    setDownloading('report');
+    setSearchError(null);
+    try {
+      const { data } = await axios.post(
+        `${API}/api/pdf/create-report`,
+        { pdfId, searchTerm, results: searchResults.results },
+        blobConfig()
+      );
+      triggerDownload(new Blob([data]), `${searchTerm}-report.docx`);
+    } catch (e) {
+      const msg = await readBlobError(e);
+      setSearchError('Report error: ' + msg);
+    } finally {
+      setDownloading(null);
+    }
   };
 
-  const fmtSize = b => b < 1048576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1048576).toFixed(1)} MB`;
+  // ── فہارس Functions ──
+  const uploadForFiharis = async () => {
+    if (!fiharisFile) { setFiharisError('PDF select karo pehle'); return; }
+    setFiharisError(null);
+    setFiharisUploadProg({ percent: 0, message: 'Preparing...' });
+    setFiharisUploadTime(0);
+    fiharisUploadStartRef.current = Date.now();
 
-  const steps = [
-    { num: 1, icon: '📄', label: 'PDF Load' },
-    { num: 2, icon: '🖼️', label: 'Images' },
-    { num: 3, icon: '🔍', label: 'OCR' },
-    { num: 4, icon: '📝', label: 'Word File' },
-  ];
+    if (fiharisUploadTimerRef.current) clearInterval(fiharisUploadTimerRef.current);
+    fiharisUploadTimerRef.current = setInterval(() => {
+      setFiharisUploadTime(Math.floor((Date.now() - fiharisUploadStartRef.current) / 1000));
+    }, 1000);
 
-  if (loading) return (
-    <div className="splash">
-      <div className="splash-logo">
-        <span className="splash-icon">📄</span>
-        <div className="splash-bar"><div className="splash-fill" /></div>
+    const fd = new FormData();
+    fd.append('pdf', fiharisFile);
+
+    try {
+      const config = { withCredentials: true };
+      const tokenStr = localStorage.getItem('tokens');
+      if (tokenStr) {
+        try { config.headers = { 'X-Tokens': JSON.stringify(JSON.parse(tokenStr)) }; } catch (e) {}
+      }
+
+      setFiharisUploadProg({ percent: 5, message: '📤 PDF upload ho rahi hai...' });
+      const { data } = await axios.post(`${API}/api/pdf/extract`, fd, config);
+
+      if (fiharisUploadEsRef.current) fiharisUploadEsRef.current.close();
+      const es = new EventSource(`${API}/api/progress/${data.jobId}`);
+      fiharisUploadEsRef.current = es;
+
+      es.onmessage = e => {
+        const d = JSON.parse(e.data);
+        setFiharisUploadProg({ percent: d.percent, message: d.message });
+        if (d.status === 'done') {
+          clearInterval(fiharisUploadTimerRef.current);
+          setFiharisPdfId(d.pdfId || data.pdfId);
+          setFiharisUploadProg(null);
+          es.close();
+        } else if (d.status === 'error') {
+          clearInterval(fiharisUploadTimerRef.current);
+          setFiharisError(d.message || 'Extract fail');
+          setFiharisUploadProg(null);
+          es.close();
+        }
+      };
+      es.onerror = () => { clearInterval(fiharisUploadTimerRef.current); es.close(); };
+    } catch (e) {
+      clearInterval(fiharisUploadTimerRef.current);
+      setFiharisError(e.response?.data?.error || e.message || 'Upload fail');
+      setFiharisUploadProg(null);
+    }
+  };
+
+  const generateFiharis = async () => {
+    if (!fiharisPdfId) return;
+    setFiharisError(null);
+    setFiharisUrl(null);
+    setFiharisStats(null);
+    setFiharisGenProg({ percent: 0, message: 'شروع ہو رہا ہے...' });
+    setFiharisGenTime(0);
+    fiharisGenStartRef.current = Date.now();
+
+    if (fiharisGenTimerRef.current) clearInterval(fiharisGenTimerRef.current);
+    fiharisGenTimerRef.current = setInterval(() => {
+      setFiharisGenTime(Math.floor((Date.now() - fiharisGenStartRef.current) / 1000));
+    }, 1000);
+
+    try {
+      const config = { withCredentials: true };
+      const tokenStr = localStorage.getItem('tokens');
+      if (tokenStr) {
+        try { config.headers = { 'X-Tokens': JSON.stringify(JSON.parse(tokenStr)) }; } catch (e) {}
+      }
+
+      const { data } = await axios.post(`${API}/api/pdf/generate-index`, { pdfId: fiharisPdfId }, config);
+
+      if (fiharisGenEsRef.current) fiharisGenEsRef.current.close();
+      const es = new EventSource(`${API}/api/progress/${data.jobId}`);
+      fiharisGenEsRef.current = es;
+
+      es.onmessage = e => {
+        const d = JSON.parse(e.data);
+        setFiharisGenProg({ percent: d.percent, message: d.message });
+        if (d.status === 'done') {
+          clearInterval(fiharisGenTimerRef.current);
+          setFiharisUrl(d.downloadUrl);
+          setFiharisStats(d.stats);
+          setFiharisGenProg(null);
+          es.close();
+        } else if (d.status === 'error') {
+          clearInterval(fiharisGenTimerRef.current);
+          setFiharisError(d.message || 'Generate fail');
+          setFiharisGenProg(null);
+          es.close();
+        }
+      };
+      es.onerror = () => { clearInterval(fiharisGenTimerRef.current); es.close(); };
+    } catch (e) {
+      clearInterval(fiharisGenTimerRef.current);
+      setFiharisError(e.response?.data?.error || e.message || 'Generate fail');
+      setFiharisGenProg(null);
+    }
+  };
+
+  const resetFiharis = () => {
+    if (fiharisUploadEsRef.current) fiharisUploadEsRef.current.close();
+    if (fiharisGenEsRef.current) fiharisGenEsRef.current.close();
+    if (fiharisUploadTimerRef.current) clearInterval(fiharisUploadTimerRef.current);
+    if (fiharisGenTimerRef.current) clearInterval(fiharisGenTimerRef.current);
+    setFiharisFile(null);
+    setFiharisPdfId(null);
+    setFiharisUploadProg(null);
+    setFiharisGenProg(null);
+    setFiharisUrl(null);
+    setFiharisStats(null);
+    setFiharisError(null);
+    setFiharisUploadTime(0);
+    setFiharisGenTime(0);
+  };
+
+  const resetConvert = () => {
+    setConvertFile(null);
+    setConvertProgress(null);
+    setConvertUrl(null);
+    setConvertError(null);
+  };
+
+  const resetSearch = () => {
+    if (searchEsRef.current) searchEsRef.current.close();
+    if (searchTimerRef.current) clearInterval(searchTimerRef.current);
+    setSearchFile(null);
+    setSearchTerm('');
+    setSearchResults(null);
+    setPdfId(null);
+    setSearchError(null);
+    setSearchProgress(null);
+    setSearchTime(0);
+    setDownloading(null);
+  };
+
+  if (loading)
+    return (
+      <div className="splash">
+        <div className="splash-logo">
+          <span className="splash-icon">📄</span>
+          <div className="splash-bar">
+            <div className="splash-fill" />
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    );
 
   return (
     <div className="app">
       <div className="bg-gradient" />
-      <div className="bg-dots" />
 
-      {/* Header */}
+      {/* ── Header ── */}
       <header className="header">
         <div className="header-inner">
           <div className="logo">
-            <div className="logo-badge">
-              <span>📄</span>
-            </div>
+            <div className="logo-badge">📄</div>
             <div>
-              <div className="logo-ur">اردو PDF کنورٹر</div>
-              <div className="logo-en">Urdu PDF Converter</div>
+              <div className="logo-ur">اردو PDF</div>
+              <div className="logo-en">Urdu PDF Pro</div>
             </div>
           </div>
           {user && (
             <div className="user-pill">
               <img src={user.picture} alt="" className="user-av" />
-              <span className="user-nm">{user.name.split(' ')[0]}</span>
-              <button className="btn-out" onClick={logout}>↩ Logout</button>
+              <span>{user.name.split(' ')[0]}</span>
+              <button className="btn-logout" onClick={logout}>
+                ↩ Logout
+              </button>
             </div>
           )}
         </div>
       </header>
 
+      {/* ── Main ── */}
       <main className="main">
         {!user ? (
-          /* ── Login ── */
+          // Login Screen
           <div className="login-wrap">
             <div className="login-card">
-              <div className="login-glow" />
-              <div className="login-icon-wrap">
-                <span className="login-main-icon">📄</span>
-                <div className="login-badge-ring" />
-              </div>
-              <h1 className="login-title">اردو PDF کنورٹر</h1>
-              <p className="login-sub">PDF فائل کو قابلِ ترمیم Word میں تبدیل کریں</p>
-              <p className="login-sub-en">Convert Urdu PDF to editable Word file instantly</p>
-
-              <div className="feat-grid">
-                {[
-                  ['⚡','Fast Conversion'],
-                  ['🔍','Google OCR'],
-                  ['📖','1000 Pages'],
-                  ['🔒','Your Drive'],
-                ].map(([ic, lb]) => (
-                  <div className="feat-chip" key={lb}>
-                    <span>{ic}</span><span>{lb}</span>
-                  </div>
-                ))}
-              </div>
-
-              <button className="btn-google" onClick={() => window.location.href = `${API}/auth/google`}>
-                <svg width="20" height="20" viewBox="0 0 48 48">
-                  <path d="M47.5 24.5c0-1.6-.1-3.2-.4-4.8H24v9.1h13.2c-.6 3-2.3 5.6-5 7.3v6h8c4.8-4.4 7.3-10.9 7.3-17.6z" fill="#4285F4"/>
-                  <path d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-8-6c-2.1 1.4-4.8 2.3-7.9 2.3-6.1 0-11.2-4.1-13-9.5H3v6.2C6.9 42.7 15 48 24 48z" fill="#34A853"/>
-                  <path d="M11 28.9c-.5-1.4-.7-2.9-.7-4.4s.2-3 .7-4.4v-6.2H3C1.1 17.5 0 20.6 0 24s1.1 6.5 3 8.9l8-3.1z" fill="#FBBC05"/>
-                  <path d="M24 9.5c3.4 0 6.5 1.2 8.9 3.5l6.6-6.6C35.9 2.5 30.5 0 24 0 15 0 6.9 5.3 3 13.1l8 6.2C12.8 13.6 17.9 9.5 24 9.5z" fill="#EA4335"/>
-                </svg>
-                Google se Login Karo
+              <span className="login-icon">📄</span>
+              <h1>اردو PDF</h1>
+              <p>PDF Convert اور Search کریں</p>
+              <button className="btn-google" onClick={() => (window.location.href = `${API}/auth/google`)}>
+                🔐 Google سے Login
               </button>
-              <p className="login-note">🔒 Aapka data sirf aapke Google Drive mein — kisi ke saath share nahi hoga</p>
             </div>
           </div>
         ) : (
-          /* ── Converter/Search ── */
-          <div className="conv-wrap">
-            <div className="conv-hero">
-              <div className="mode-toggle">
-                <button
-                  className={`mode-btn ${mode === 'convert' ? 'active' : ''}`}
-                  onClick={() => { setMode('convert'); setSearchResults(null); setPdfId(null); setSearchTerm(''); }}
-                >
-                  📄 Convert
-                </button>
-                <button
-                  className={`mode-btn ${mode === 'search' ? 'active' : ''}`}
-                  onClick={() => { setMode('search'); setDownloadUrl(null); setProgress(null); }}
-                >
-                  🔍 Search
-                </button>
-              </div>
-              <h1 className="conv-title">
-                {mode === 'convert' ? 'PDF → Word Convert Karo' : 'PDF mein lafz dhundo'}
-              </h1>
-              <p className="conv-sub">
-                {mode === 'convert'
-                  ? 'Urdu PDF upload karo — editable Word file milegi'
-                  : 'PDF upload karo aur apna lafz search karo'}
-              </p>
+          // App Content
+          <div className="app-container">
+            {/* Mode Tabs */}
+            <div className="mode-tabs">
+              <button
+                className={`tab ${mode === 'convert' ? 'active' : ''}`}
+                onClick={() => setMode('convert')}
+              >
+                📄 Convert
+              </button>
+              <button
+                className={`tab ${mode === 'search' ? 'active' : ''}`}
+                onClick={() => setMode('search')}
+              >
+                🔍 Search
+              </button>
+              <button
+                className={`tab ${mode === 'fiharis' ? 'active' : ''}`}
+                onClick={() => setMode('fiharis')}
+              >
+                📋 فہارس
+              </button>
             </div>
 
-            {!progress && !downloadUrl && (
-              <div className="conv-body">
-                {/* Drop Zone */}
-                <div
-                  className={`drop ${dragOver ? 'drag' : ''} ${file ? 'has-file' : ''}`}
-                  onDrop={handleDrop}
-                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                  onDragLeave={() => setDragOver(false)}
-                  onClick={() => !file && fileRef.current.click()}
-                >
-                  <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={handleFile} style={{ display: 'none' }} />
-                  {file ? (
-                    <div className="file-row">
-                      <div className="file-ic">
-                        {file.type === 'application/pdf' ? '📑' : '🖼️'}
-                      </div>
-                      <div className="file-meta">
-                        <div className="file-nm">{file.name}</div>
-                        <div className="file-sz">{fmtSize(file.size)}</div>
-                      </div>
-                      <button className="file-rm" onClick={e => { e.stopPropagation(); reset(); }}>✕</button>
+            {/* Convert Tab */}
+            {mode === 'convert' && (
+              <section className="section">
+                <h1>Convert to Word</h1>
+                <p>PDF، Image یا Word file upload karo — clean Urdu Word file download karo</p>
+
+                {!convertProgress && !convertUrl && (
+                  <>
+                    <div
+                      className={`drop-zone ${dragOver ? 'drag' : ''} ${convertFile ? 'has-file' : ''}`}
+                      onDrop={handleDrop}
+                      onDragOver={e => {
+                        e.preventDefault();
+                        setDragOver(true);
+                      }}
+                      onDragLeave={() => setDragOver(false)}
+                      onClick={() => !convertFile && convertFileRef.current.click()}
+                    >
+                      <input
+                        ref={convertFileRef}
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.doc"
+                        onChange={e => {
+                          const f = e.target.files[0];
+                          if (f) {
+                            setConvertFile(f);
+                            setConvertError(null);
+                          }
+                        }}
+                        style={{ display: 'none' }}
+                      />
+                      {convertFile ? (
+                        <div className="file-info">
+                          <span className="file-icon">📑</span>
+                          <div>
+                            <div className="file-name">{convertFile.name}</div>
+                            <div className="file-size">
+                              {(convertFile.size / 1024 / 1024).toFixed(1)} MB
+                            </div>
+                          </div>
+                          <button
+                            className="btn-remove"
+                            onClick={e => {
+                              e.stopPropagation();
+                              resetConvert();
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="drop-prompt">
+                          <span>📂</span>
+                          <p>PDF، Word یا Image drop karo</p>
+                          <small>ya click karke select karo (.pdf .docx .jpg .png)</small>
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <div className="drop-inner">
-                      <div className="drop-anim">
-                        <div className="drop-circle c1" />
-                        <div className="drop-circle c2" />
-                        <div className="drop-circle c3" />
-                        <span className="drop-main-ic">📂</span>
-                      </div>
-                      <div className="drop-txt">Yahan PDF ya Image drop karo</div>
-                      <div className="drop-st">ya click karke select karo</div>
-                      <div className="drop-chips">
-                        <span className="chip">PDF</span>
-                        <span className="chip">JPG</span>
-                        <span className="chip">PNG</span>
-                        <span className="chip">Max 500MB</span>
-                        <span className="chip">1000 Pages</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-                {error && <div className="err-box"><span>⚠️</span> {error}</div>}
-                {file && (
-                  <button className="btn-conv" onClick={extractPdf}>
-                    <span className="btn-conv-ic">📤</span>
-                    PDF Load Karo
-                    <span className="btn-conv-arr">→</span>
-                  </button>
+
+                    {convertError && <div className="error-box">{convertError}</div>}
+
+                    {convertFile && (
+                      <button className="btn-primary" onClick={convert}>
+                        🚀 Convert Karo
+                      </button>
+                    )}
+                  </>
                 )}
-              </div>
+
+                {convertProgress && (
+                  <div className="progress-card">
+                    <div className="progress-header">
+                      <div className="progress-info">
+                        <span className="status-badge">{convertProgress.message}</span>
+                        <span className="percent-display">{convertProgress.percent}%</span>
+                      </div>
+                      <div className="time-info">
+                        <div className="time-item">
+                          <span className="time-label">⏱️ Elapsed</span>
+                          <span className="time-value">{formatTime(convertTime)}</span>
+                        </div>
+                        <div className="time-item">
+                          <span className="time-label">⏳ Remaining</span>
+                          <span className="time-value">
+                            {formatTime(Math.round(getTimeRemaining(convertTime, convertProgress.percent)))}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="progress-container">
+                      <div className="progress-bar-outer">
+                        <div
+                          className="progress-bar-inner"
+                          style={{ width: `${convertProgress.percent}%` }}
+                        >
+                          <span className="progress-label">{convertProgress.percent}%</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="progress-steps">
+                      <div className={`step ${convertProgress.percent >= 10 ? 'done' : ''}`}>
+                        <span>📄</span>
+                        <small>Load PDF</small>
+                      </div>
+                      <div className={`step ${convertProgress.percent >= 45 ? 'done' : ''}`}>
+                        <span>🖼️</span>
+                        <small>Convert Pages</small>
+                      </div>
+                      <div className={`step ${convertProgress.percent >= 85 ? 'done' : ''}`}>
+                        <span>🔤</span>
+                        <small>OCR</small>
+                      </div>
+                      <div className={`step ${convertProgress.percent >= 95 ? 'done' : ''}`}>
+                        <span>✍️</span>
+                        <small>Build Doc</small>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {convertUrl && (
+                  <div className="success-card">
+                    <span>✓</span>
+                    <p>Conversion Complete!</p>
+                    <a href={`${API}${convertUrl}`} className="btn-download" download>
+                      ⬇️ Word File Download
+                    </a>
+                    <button className="btn-secondary" onClick={resetConvert}>
+                      + Nayi File Convert
+                    </button>
+                  </div>
+                )}
+              </section>
             )}
 
-            {/* Search Interface */}
-            {mode === 'search' && pdfId && (
-              <div className="search-interface">
-                <div className="search-box">
-                  <input
-                    type="text"
-                    className="search-input"
-                    placeholder="لفظ یا جملہ لکھیں / Search word or phrase"
-                    value={searchTerm}
-                    onChange={e => setSearchTerm(e.target.value)}
-                    onKeyPress={e => e.key === 'Enter' && search()}
-                  />
-                  <button className="btn-search" onClick={search} disabled={searching}>
-                    {searching ? '⏳ Searching...' : '🔍 Search Karo'}
-                  </button>
-                  <button className="btn-back" onClick={() => { setPdfId(null); setFile(null); setSearchTerm(''); setSearchResults(null); }}>
-                    ↩ Back
-                  </button>
-                </div>
+            {/* Search Tab */}
+            {mode === 'search' && (
+              <section className="section">
+                <h1>PDF mein Lafz Tholao</h1>
+                <p>PDF upload karo aur lafz search karo</p>
 
-                {searchResults && (
-                  <div className="search-results">
-                    <div className="results-header">
-                      <span className="results-title">"{searchResults.searchTerm}" ke results</span>
-                      <span className="results-count">Total matches: {searchResults.totalMatches}</span>
-                    </div>
-                    {searchResults.results.length > 0 ? (
-                      <div className="results-list">
-                        {searchResults.results.map((result, idx) => (
-                          <div key={idx} className="result-card">
-                            <div className="result-page">Page {result.pageNum}</div>
-                            <div className="result-count">{result.matchCount} match{result.matchCount > 1 ? 'es' : ''}</div>
-                            <div className="result-snippet">{result.snippet}</div>
+                {!pdfId ? (
+                  <>
+                    <div
+                      className={`drop-zone ${dragOver ? 'drag' : ''} ${searchFile ? 'has-file' : ''}`}
+                      onDrop={handleDrop}
+                      onDragOver={e => {
+                        e.preventDefault();
+                        setDragOver(true);
+                      }}
+                      onDragLeave={() => setDragOver(false)}
+                      onClick={() => !searchFile && searchFileRef.current.click()}
+                    >
+                      <input
+                        ref={searchFileRef}
+                        type="file"
+                        accept=".pdf,.docx,.doc"
+                        onChange={e => {
+                          const f = e.target.files[0];
+                          if (f) setSearchFile(f);
+                        }}
+                        style={{ display: 'none' }}
+                      />
+                      {searchFile ? (
+                        <div className="file-info">
+                          <span className="file-icon">📑</span>
+                          <div>
+                            <div className="file-name">{searchFile.name}</div>
+                            <div className="file-size">
+                              {(searchFile.size / 1024 / 1024).toFixed(1)} MB
+                            </div>
                           </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="no-results">
-                        <span>❌</span> "{searchResults.searchTerm}" nahi mila
+                          <button
+                            className="btn-remove"
+                            onClick={e => {
+                              e.stopPropagation();
+                              setSearchFile(null);
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="drop-prompt">
+                          <span>📂</span>
+                          <p>PDF یا Word drop karo</p>
+                          <small>ya click karke select karo (.pdf .docx)</small>
+                        </div>
+                      )}
+                    </div>
+
+                    {searchError && <div className="error-box">{searchError}</div>}
+
+                    {searchFile && (
+                      <button className="btn-primary" onClick={uploadForSearch}>
+                        📤 PDF Upload کریں
+                      </button>
+                    )}
+
+                    {searchProgress && (
+                      <div className="progress-card">
+                        <div className="progress-header">
+                          <div className="progress-info">
+                            <span className="status-badge">{searchProgress.message}</span>
+                            <span className="percent-display">{searchProgress.percent}%</span>
+                          </div>
+                          <div className="time-info">
+                            <div className="time-item">
+                              <span className="time-label">⏱️ Elapsed</span>
+                              <span className="time-value">{formatTime(searchTime)}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="progress-container">
+                          <div className="progress-bar-outer">
+                            <div
+                              className="progress-bar-inner"
+                              style={{ width: `${searchProgress.percent}%` }}
+                            >
+                              <span className="progress-label">{searchProgress.percent}%</span>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     )}
+                  </>
+                ) : (
+                  <>
+                    <div className="search-box">
+                      <input
+                        type="text"
+                        className="search-input"
+                        placeholder="lafz likhein..."
+                        value={searchTerm}
+                        onChange={e => setSearchTerm(e.target.value)}
+                        onKeyPress={e => e.key === 'Enter' && search()}
+                      />
+                      <button className="btn-primary" onClick={search} disabled={searching}>
+                        {searching ? '⏳ Searching...' : '🔍 Search'}
+                      </button>
+                      <button className="btn-secondary" onClick={resetSearch}>
+                        ↩ Back
+                      </button>
+                    </div>
+
+                    {searchResults && (
+                      <div className="results-card">
+                        <div className="results-header">
+                          <div>
+                            <span className="results-title">"{searchResults.searchTerm}"</span>
+                            <p style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '4px' }}>
+                              {searchResults.results.length} pages میں ملا • {searchResults.totalMatches} کل matches
+                            </p>
+                          </div>
+                          {searchResults.results.length > 0 && (
+                            <div className="download-buttons">
+                              <button
+                                className="btn-download"
+                                onClick={downloadReport}
+                                disabled={downloading !== null}
+                                title="Detailed Word report (page numbers + snippets)"
+                              >
+                                {downloading === 'report' ? '⏳...' : '📋 Report'}
+                              </button>
+                              <button
+                                className="btn-download"
+                                onClick={downloadFilteredPdf}
+                                disabled={downloading !== null}
+                                title="PDF of only the matching pages"
+                              >
+                                {downloading === 'pdf' ? '⏳...' : '📄 Matching PDF'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {searchResults.results.length > 0 ? (
+                          <div className="results-list">
+                            {searchResults.results.map((r, i) => (
+                              <div key={i} className="result-item">
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+                                  <span className="page-badge">📄 Page {r.pageNum}</span>
+                                  <span className="match-count">{r.matchCount} بار</span>
+                                </div>
+                                <p className="snippet">{r.snippet}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="no-results">❌ Lafz nahi mila</div>
+                        )}
+                      </div>
+                    )}
+
+                    {searchError && <div className="error-box">{searchError}</div>}
+                  </>
+                )}
+              </section>
+            )}
+            {/* فہارس Tab */}
+            {mode === 'fiharis' && (
+              <section className="section">
+                <h1>فہارس بنائیں</h1>
+                <p>PDF upload کریں — شخصیات، اماکن، کتابیں اور زبانوں کی فہرست خودبخود بنے گی</p>
+
+                {/* Phase 1: Upload */}
+                {!fiharisPdfId && (
+                  <>
+                    <div
+                      className={`drop-zone ${dragOver ? 'drag' : ''} ${fiharisFile ? 'has-file' : ''}`}
+                      onDrop={handleDrop}
+                      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                      onDragLeave={() => setDragOver(false)}
+                      onClick={() => !fiharisFile && fiharisFileRef.current.click()}
+                    >
+                      <input
+                        ref={fiharisFileRef}
+                        type="file"
+                        accept=".pdf,.docx,.doc"
+                        onChange={e => { const f = e.target.files[0]; if (f) { setFiharisFile(f); setFiharisError(null); } }}
+                        style={{ display: 'none' }}
+                      />
+                      {fiharisFile ? (
+                        <div className="file-info">
+                          <span className="file-icon">📑</span>
+                          <div>
+                            <div className="file-name">{fiharisFile.name}</div>
+                            <div className="file-size">{(fiharisFile.size / 1024 / 1024).toFixed(1)} MB</div>
+                          </div>
+                          <button className="btn-remove" onClick={e => { e.stopPropagation(); setFiharisFile(null); }}>✕</button>
+                        </div>
+                      ) : (
+                        <div className="drop-prompt">
+                          <span>📂</span>
+                          <p>اردو PDF یا Word drop کریں</p>
+                          <small>یا click کر کے select کریں (.pdf .docx)</small>
+                        </div>
+                      )}
+                    </div>
+
+                    {fiharisError && <div className="error-box">{fiharisError}</div>}
+
+                    {fiharisFile && !fiharisUploadProg && (
+                      <button className="btn-primary" onClick={uploadForFiharis}>
+                        📤 PDF Upload کریں
+                      </button>
+                    )}
+
+                    {fiharisUploadProg && (
+                      <div className="progress-card">
+                        <div className="progress-header">
+                          <div className="progress-info">
+                            <span className="status-badge">{fiharisUploadProg.message}</span>
+                            <span className="percent-display">{fiharisUploadProg.percent}%</span>
+                          </div>
+                          <div className="time-info">
+                            <div className="time-item">
+                              <span className="time-label">⏱️ Elapsed</span>
+                              <span className="time-value">{formatTime(fiharisUploadTime)}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="progress-container">
+                          <div className="progress-bar-outer">
+                            <div className="progress-bar-inner" style={{ width: `${fiharisUploadProg.percent}%` }}>
+                              <span className="progress-label">{fiharisUploadProg.percent}%</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Phase 2: Generate */}
+                {fiharisPdfId && !fiharisUrl && (
+                  <>
+                    <div className="fiharis-ready-card">
+                      <div className="fiharis-ready-icon">✅</div>
+                      <div>
+                        <div className="fiharis-ready-title">PDF تیار ہے!</div>
+                        <div className="fiharis-ready-sub">{fiharisFile?.name}</div>
+                      </div>
+                    </div>
+
+                    {!fiharisGenProg && (
+                      <button className="btn-primary fiharis-gen-btn" onClick={generateFiharis}>
+                        📋 فہارس بنائیں
+                      </button>
+                    )}
+
+                    {fiharisError && <div className="error-box">{fiharisError}</div>}
+
+                    {fiharisGenProg && (
+                      <div className="progress-card">
+                        <div className="progress-header">
+                          <div className="progress-info">
+                            <span className="status-badge">{fiharisGenProg.message}</span>
+                            <span className="percent-display">{fiharisGenProg.percent}%</span>
+                          </div>
+                          <div className="time-info">
+                            <div className="time-item">
+                              <span className="time-label">⏱️ Elapsed</span>
+                              <span className="time-value">{formatTime(fiharisGenTime)}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="progress-container">
+                          <div className="progress-bar-outer">
+                            <div className="progress-bar-inner" style={{ width: `${fiharisGenProg.percent}%` }}>
+                              <span className="progress-label">{fiharisGenProg.percent}%</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="progress-steps">
+                          <div className={`step ${fiharisGenProg.percent >= 15 ? 'done' : ''}`}>
+                            <span>📖</span><small>Load Pages</small>
+                          </div>
+                          <div className={`step ${fiharisGenProg.percent >= 50 ? 'done' : ''}`}>
+                            <span>🔍</span><small>شخصیات</small>
+                          </div>
+                          <div className={`step ${fiharisGenProg.percent >= 75 ? 'done' : ''}`}>
+                            <span>🗺️</span><small>اماکن</small>
+                          </div>
+                          <div className={`step ${fiharisGenProg.percent >= 90 ? 'done' : ''}`}>
+                            <span>📝</span><small>Build Doc</small>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <button className="btn-secondary" onClick={resetFiharis} style={{ marginTop: '12px' }}>
+                      ↩ نئی PDF
+                    </button>
+                  </>
+                )}
+
+                {/* Phase 3: Done */}
+                {fiharisUrl && (
+                  <div className="fiharis-success-card">
+                    <div className="fiharis-success-icon">📋</div>
+                    <div className="fiharis-success-title">فہارس تیار ہے!</div>
+
+                    {fiharisStats && (
+                      <div className="fiharis-stats">
+                        <div className="fiharis-stat">
+                          <span className="fiharis-stat-num">{fiharisStats.شخصیات}</span>
+                          <span className="fiharis-stat-label">شخصیات</span>
+                        </div>
+                        <div className="fiharis-stat">
+                          <span className="fiharis-stat-num">{fiharisStats.اماکن}</span>
+                          <span className="fiharis-stat-label">اماکن</span>
+                        </div>
+                        <div className="fiharis-stat">
+                          <span className="fiharis-stat-num">{fiharisStats.کتابیں}</span>
+                          <span className="fiharis-stat-label">کتابیں</span>
+                        </div>
+                        <div className="fiharis-stat">
+                          <span className="fiharis-stat-num">{fiharisStats.زبانیں}</span>
+                          <span className="fiharis-stat-label">زبانیں</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <a href={`${API}${fiharisUrl}`} className="btn-download fiharis-dl-btn" download>
+                      ⬇️ فہارس Download کریں (.docx)
+                    </a>
+                    <button className="btn-secondary" onClick={resetFiharis}>
+                      + نئی PDF
+                    </button>
                   </div>
                 )}
-              </div>
+              </section>
             )}
+
           </div>
         )}
-
-            {/* Progress */}
-            {progress?.status === 'processing' && (
-              <div className="prog-card">
-                <div className="prog-header">
-                  <div className="prog-spinner" />
-                  <div className="prog-htxt">Processing ho raha hai...</div>
-                </div>
-
-                <div className="prog-steps">
-                  {steps.map(s => {
-                    const st = progress.step > s.num ? 'done' : progress.step === s.num ? 'active' : 'wait';
-                    return (
-                      <div key={s.num} className={`pstep ${st}`}>
-                        <div className="pstep-dot">
-                          {st === 'done' ? '✓' : s.icon}
-                        </div>
-                        <div className="pstep-lbl">{s.label}</div>
-                      </div>
-                    );
-                  })}
-                  <div className="pstep-line">
-                    <div className="pstep-fill" style={{ width: `${((progress.step - 1) / 3) * 100}%` }} />
-                  </div>
-                </div>
-
-                <div className="prog-bar-wrap">
-                  <div className="prog-bar" style={{ width: `${progress.percent}%` }} />
-                </div>
-                <div className="prog-info">
-                  <span className="prog-pct">{progress.percent}%</span>
-                  <span className="prog-msg">{progress.message}</span>
-                </div>
-                <div className="prog-note">⏳ Page band mat karna — processing chal rahi hai</div>
-              </div>
-            )}
-
-            {/* Done */}
-            {downloadUrl && (
-              <div className="done-card">
-                <div className="done-confetti">🎉</div>
-                <div className="done-check">✓</div>
-                <div className="done-title">Conversion Complete!</div>
-                <div className="done-sub">Aapki Word file ready hai — ab edit kar sakte ho</div>
-                <a href={`${API}${downloadUrl}`} className="btn-dl" download>
-                  <span>⬇️</span> Word File Download Karo (.docx)
-                </a>
-                <button className="btn-new" onClick={reset}>
-                  + Nayi File Convert Karo
-                </button>
-              </div>
-            )}
-
-            {error && progress?.status === 'error' && (
-              <div className="err-card">
-                <div className="err-ic">❌</div>
-                <div className="err-msg">{error}</div>
-                <button className="btn-retry" onClick={reset}>↩ Dobara Karo</button>
-              </div>
-            )}
-
-            {/* ── SEARCH MODE ── */}
-            {mode === 'search' && !pdfId && (
-              <div className="search-section">
-                <div
-                  className={`drop ${dragOver ? 'drag' : ''} ${file ? 'has-file' : ''}`}
-                  onDrop={handleDrop}
-                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                  onDragLeave={() => setDragOver(false)}
-                  onClick={() => !file && fileRef.current.click()}
-                >
-                  {file ? (
-                    <div className="file-row">
-                      <div className="file-ic">📑</div>
-                      <div className="file-meta">
-                        <div className="file-nm">{file.name}</div>
-                        <div className="file-sz">{(file.size/1024).toFixed(1)} KB</div>
-                      </div>
-                      <button className="file-rm" onClick={e => { e.stopPropagation(); setFile(null); }}>✕</button>
-                    </div>
-                  ) : (
-                    <div className="drop-inner">
-                      <span className="drop-main-ic">📂</span>
-                      <div className="drop-txt">PDF upload karo search karne ke liye</div>
-                      <div className="drop-st">ya click karke select karo</div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
       </main>
 
+      {/* Footer */}
       <footer className="footer">
-        <span>اردو PDF کنورٹر</span> • <span>Google Drive OCR</span> • <span>Made with ❤️</span>
+        <span>© Urdu PDF Pro 2026</span> • <span>Made with ❤️</span>
       </footer>
     </div>
   );
