@@ -186,6 +186,20 @@ export default function App() {
 
   const actIcon = { converts: '📄', searches: '🔍', indexes: '📋' };
 
+  // Highlight the searched term inside a snippet
+  const highlightSnippet = (snippet, term) => {
+    if (!snippet || !term) return snippet;
+    try {
+      const esc = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const parts = String(snippet).split(new RegExp(`(${esc})`, 'gi'));
+      return parts.map((p, i) =>
+        p.toLowerCase() === term.toLowerCase()
+          ? <mark key={i} className="hl">{p}</mark>
+          : <span key={i}>{p}</span>
+      );
+    } catch (e) { return snippet; }
+  };
+
   // ── Dictionary Functions ──
   const dictAuthOpts = () => {
     const t = localStorage.getItem('tokens');
@@ -741,30 +755,105 @@ export default function App() {
       {/* ── Main ── */}
       <main className="main">
         {!user ? (
-          // Login Screen
-          <div className="login-wrap">
-            <div className="login-card">
-              {/* Realistic CSS 3D Urdu book */}
-              <div className="book3d-stage">
-                <div className="book3d">
-                  <div className="book3d__face book3d__front">
-                    <span className="book3d__emoji">📖</span>
-                    <span className="book3d__title">اردو</span>
-                    <span className="book3d__sub">PDF&nbsp;Pro</span>
-                  </div>
-                  <div className="book3d__face book3d__back" />
-                  <div className="book3d__face book3d__spine" />
-                  <div className="book3d__face book3d__pages" />
-                  <div className="book3d__face book3d__top" />
-                  <div className="book3d__face book3d__bottom" />
+          // Landing Page
+          <div className="landing">
+            {/* Hero */}
+            <section className="hero">
+              <div className="hero-left">
+                <span className="hero-pill">✨ 100% Free • No watermark</span>
+                <h1 className="hero-title">اردو PDF Pro</h1>
+                <p className="hero-tag">
+                  Urdu PDF, Word اور Images — Convert کریں, الفاظ Search کریں،
+                  اور خودکار <b>فہارس</b> (Index) بنائیں۔ سب کچھ ایک جگہ۔
+                </p>
+                <ul className="hero-points">
+                  <li>📄 Scanned/Image PDF → editable Urdu Word (OCR)</li>
+                  <li>🔍 کسی بھی لفظ کو ڈھونڈیں — exact صفحہ نمبر کے ساتھ</li>
+                  <li>📋 شخصیات، اماکن، کتابیں، زبانیں کی فہرست خودکار</li>
+                </ul>
+                <button className="btn-google hero-btn" onClick={() => (window.location.href = `${API}/auth/google`)}>
+                  🔐 Google سے Login کریں
+                </button>
+                <div className="hero-trust">
+                  <span>🔒 Secure Google login</span>
+                  <span>•</span>
+                  <span>⚡ Fast</span>
+                  <span>•</span>
+                  <span>🆓 Free</span>
                 </div>
               </div>
-              <h1>اردو PDF</h1>
-              <p>PDF Convert اور Search کریں</p>
-              <button className="btn-google" onClick={() => (window.location.href = `${API}/auth/google`)}>
-                🔐 Google سے Login
+              <div className="hero-right">
+                {/* Realistic CSS 3D Urdu book */}
+                <div className="book3d-stage">
+                  <div className="book3d">
+                    <div className="book3d__face book3d__front">
+                      <span className="book3d__emoji">📖</span>
+                      <span className="book3d__title">اردو</span>
+                      <span className="book3d__sub">PDF&nbsp;Pro</span>
+                    </div>
+                    <div className="book3d__face book3d__back" />
+                    <div className="book3d__face book3d__spine" />
+                    <div className="book3d__face book3d__pages" />
+                    <div className="book3d__face book3d__top" />
+                    <div className="book3d__face book3d__bottom" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* Features */}
+            <section className="features">
+              <h2 className="sec-heading">کیا کیا کر سکتے ہیں؟</h2>
+              <div className="feature-grid">
+                <div className="feature-card">
+                  <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#4361ee,#6d8cfc)' }}>📄</div>
+                  <h3>Convert to Word</h3>
+                  <p>PDF، Image یا Word دیں — صاف ستھری Urdu Word file حاصل کریں۔ Scanned pages کے لیے OCR موجود ہے۔</p>
+                </div>
+                <div className="feature-card">
+                  <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#7c3aed,#a855f7)' }}>🔍</div>
+                  <h3>Smart Search</h3>
+                  <p>کوئی بھی لفظ ڈھونڈیں۔ زیر زبر کا فرق نہیں پڑتا۔ PDF رپورٹ میں ہر صفحہ نمبر مل جائے گا۔</p>
+                </div>
+                <div className="feature-card">
+                  <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#10b981,#34d399)' }}>📋</div>
+                  <h3>فہارس (Index)</h3>
+                  <p>شخصیات، اماکن، کتابیں اور زبانیں کی مکمل فہرست — ہر نام کے سامنے صفحہ نمبر۔</p>
+                </div>
+                <div className="feature-card">
+                  <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#f59e0b,#fbbf24)' }}>🎯</div>
+                  <h3>میری فہرست (100%)</h3>
+                  <p>اپنے نام خود دیں اور tool ہر صفحے پر بالکل درست ڈھونڈ کے رپورٹ بنا دے گا۔</p>
+                </div>
+              </div>
+            </section>
+
+            {/* How it works */}
+            <section className="how">
+              <h2 className="sec-heading">صرف ۳ آسان قدم</h2>
+              <div className="how-steps">
+                <div className="how-step">
+                  <div className="how-num">۱</div>
+                  <h4>File Upload کریں</h4>
+                  <p>PDF، Word یا Image — drag & drop یا click کر کے۔</p>
+                </div>
+                <div className="how-arrow">→</div>
+                <div className="how-step">
+                  <div className="how-num">۲</div>
+                  <h4>Tool منتخب کریں</h4>
+                  <p>Convert، Search یا فہارس — جو چاہیے۔</p>
+                </div>
+                <div className="how-arrow">→</div>
+                <div className="how-step">
+                  <div className="how-num">۳</div>
+                  <h4>Download کریں</h4>
+                  <p>Word یا PDF میں نتیجہ فوراً حاصل کریں۔</p>
+                </div>
+              </div>
+              <button className="btn-google how-cta" onClick={() => (window.location.href = `${API}/auth/google`)}>
+                🚀 ابھی شروع کریں — Free
               </button>
-            </div>
+            </section>
           </div>
         ) : (
           // App Content
@@ -1093,7 +1182,7 @@ export default function App() {
                                   <span className="page-badge">📄 Page {r.pageNum}</span>
                                   <span className="match-count">{r.matchCount} بار</span>
                                 </div>
-                                <p className="snippet">{r.snippet}</p>
+                                <p className="snippet">{highlightSnippet(r.snippet, searchResults.searchTerm)}</p>
                               </div>
                             ))}
                           </div>
