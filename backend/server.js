@@ -1060,7 +1060,8 @@ const HONORIFICS = [
   'چودھری','بیگم','خاتون','منشی','لالہ','رانا','سردار','نواب','بابا','آغا',
   'قاضی','مفتی','محدث','فقیہ','عارف','غوث','قطب','خلیفہ','صاحب','جناب',
   'برادر','والد','والدہ','استاد','شاگرد','امام','خطیب','مشیر','وزیر',
-  'جنرل','کرنل','کیپٹن','میجر','لیفٹیننٹ'
+  'جنرل','کرنل','کیپٹن','میجر','لیفٹیننٹ','مسٹر','مس','محترم','محترمہ',
+  'شہنشاہ','بادشاہ','نبی','رسول','صحابی','تابعی','ولی','صوفی','مجاہد'
 ];
 
 // Urdu stop words — don't include these as part of a name
@@ -1160,6 +1161,23 @@ function extractFromPage(text, pageNum) {
   const words = text.split(/\s+/).map(w => w.replace(/[۔،؟!:؛\-\.,"'()[\]{}]/g, '').trim()).filter(Boolean);
   const found = { شخصیات: new Set(), اماکن: new Set(), کتابیں: new Set(), زبانیں: new Set() };
 
+  // Normalized forms for reliable matching (handles diacritics & letter variants
+  // e.g. اُنس → انس, عربى → عربی). This makes known-list/dictionary matching exact.
+  const normText  = normalizeUrdu(text);
+  const normWords = words.map(w => normalizeUrdu(w)).filter(Boolean);
+  const normWordSet = new Set(normWords);
+
+  // Match a known term against the page using normalized text (recall + accuracy)
+  const matchKnown = (term, cat) => {
+    const nt = normalizeUrdu(term);
+    if (!nt || nt.length < 2) return;
+    if (nt.includes(' ')) {
+      if (normText.includes(nt)) found[cat].add(term);
+    } else if (normWordSet.has(nt)) {
+      found[cat].add(term);
+    }
+  };
+
   // ── 1a. Personalities via honorific PREFIX (e.g. علامہ اقبال) ─────────────
   for (let i = 0; i < words.length; i++) {
     if (HONORIFICS.includes(words[i])) {
@@ -1188,21 +1206,11 @@ function extractFromPage(text, pageNum) {
     }
   }
 
-  // ── 1c. Well-known personalities (exact match, no honorific needed) ───────
-  for (const name of FAMOUS_NAMES) {
-    if (name.includes(' ')) {
-      // multi-word name → substring match
-      if (text.includes(name)) found.شخصیات.add(name);
-    } else {
-      // single word → must be a standalone token (avoid partial matches)
-      if (words.includes(name)) found.شخصیات.add(name);
-    }
-  }
+  // ── 1c. Well-known personalities (normalized match, no honorific needed) ──
+  for (const name of FAMOUS_NAMES) matchKnown(name, 'شخصیات');
 
-  // ── 2. Known places (exact match in text) ────────────────────────────────
-  for (const place of KNOWN_PLACES) {
-    if (text.includes(place)) found.اماکن.add(place);
-  }
+  // ── 2. Known places (normalized match) ────────────────────────────────────
+  for (const place of KNOWN_PLACES) matchKnown(place, 'اماکن');
 
   // ── 3. Place-suffix detection (e.g. گوجرانوالہ, فیصل آباد suffix) ───────
   for (const w of words) {
@@ -1220,10 +1228,8 @@ function extractFromPage(text, pageNum) {
     }
   }
 
-  // ── 5. Known books (exact match) ─────────────────────────────────────────
-  for (const book of KNOWN_BOOKS) {
-    if (text.includes(book)) found.کتابیں.add(book);
-  }
+  // ── 5. Known books (normalized match) ─────────────────────────────────────
+  for (const book of KNOWN_BOOKS) matchKnown(book, 'کتابیں');
 
   // ── 6. Book-signal detection (e.g. "کتاب المنطق", "دیوان غالب") ──────────
   for (let i = 0; i < words.length - 1; i++) {
@@ -1238,21 +1244,14 @@ function extractFromPage(text, pageNum) {
     }
   }
 
-  // ── 7. Languages ──────────────────────────────────────────────────────────
-  for (const lang of LANGUAGE_NAMES) {
-    if (text.includes(lang)) found.زبانیں.add(lang);
-  }
+  // ── 7. Languages (normalized match) ───────────────────────────────────────
+  for (const lang of LANGUAGE_NAMES) matchKnown(lang, 'زبانیں');
 
-  // ── 8. Custom dictionary (user-taught vocabulary) ────────────────────────
-  // Single-word terms must match a standalone token; multi-word use substring
+  // ── 8. Custom dictionary (user-taught vocabulary) — THE 100% path ────────
+  // Whatever the user teaches is matched on every page with normalized text,
+  // so spelling/diacritic variants still match exactly.
   for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
-    for (const term of customDict[cat]) {
-      if (term.includes(' ')) {
-        if (text.includes(term)) found[cat].add(term);
-      } else if (words.includes(term)) {
-        found[cat].add(term);
-      }
-    }
+    for (const term of customDict[cat]) matchKnown(term, cat);
   }
 
   return found;
