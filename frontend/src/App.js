@@ -18,6 +18,15 @@ export default function App() {
   const [adminLoading, setAdminLoading] = useState(false);
   const ADMIN_EMAIL = 'alphacoders930@gmail.com';
 
+  // Dictionary State
+  const [dict, setDict] = useState({ شخصیات: [], اماکن: [], کتابیں: [], زبانیں: [] });
+  const [dictCounts, setDictCounts] = useState({});
+  const [dictCat, setDictCat] = useState('شخصیات');
+  const [dictText, setDictText] = useState('');
+  const [dictMsg, setDictMsg] = useState('');
+  const [dictBusy, setDictBusy] = useState(false);
+  const dictFileRef = useRef();
+
   // فہارس State
   const [fiharisFile, setFiharisFile] = useState(null);
   const [fiharisPdfId, setFiharisPdfId] = useState(null);
@@ -171,6 +180,71 @@ export default function App() {
   };
 
   const actIcon = { converts: '📄', searches: '🔍', indexes: '📋' };
+
+  // ── Dictionary Functions ──
+  const dictAuthOpts = () => {
+    const t = localStorage.getItem('tokens');
+    const u = localStorage.getItem('user');
+    const headers = {};
+    if (t) headers['X-Tokens'] = t;
+    if (u) headers['X-User'] = btoa(u);
+    return { withCredentials: true, headers };
+  };
+
+  const loadDict = async () => {
+    try {
+      const r = await axios.get(`${API}/api/dictionary`, dictAuthOpts());
+      setDict(r.data.dictionary);
+      setDictCounts(r.data.counts);
+    } catch (e) { console.error('Dict load error', e); }
+  };
+
+  const addDictText = async () => {
+    if (!dictText.trim()) return;
+    setDictBusy(true); setDictMsg('');
+    try {
+      const r = await axios.post(`${API}/api/dictionary/add`,
+        { category: dictCat, text: dictText }, dictAuthOpts());
+      setDictMsg(`✅ ${r.data.added} naye alfaaz add hue (total: ${r.data.total})`);
+      setDictText('');
+      loadDict();
+    } catch (e) { setDictMsg('❌ Add fail: ' + (e.response?.data?.error || e.message)); }
+    setDictBusy(false);
+  };
+
+  const uploadDictFile = async (file) => {
+    if (!file) return;
+    setDictBusy(true); setDictMsg('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('category', dictCat);
+      const opts = dictAuthOpts();
+      opts.headers['Content-Type'] = 'multipart/form-data';
+      const r = await axios.post(`${API}/api/dictionary/upload`, fd, opts);
+      setDictMsg(`✅ File se ${r.data.added} alfaaz add hue (total: ${r.data.total})`);
+      loadDict();
+    } catch (e) { setDictMsg('❌ Upload fail: ' + (e.response?.data?.error || e.message)); }
+    setDictBusy(false);
+  };
+
+  const removeDictTerm = async (category, term) => {
+    try {
+      await axios.post(`${API}/api/dictionary/remove`, { category, term }, dictAuthOpts());
+      setDict(prev => ({ ...prev, [category]: prev[category].filter(t => t !== term) }));
+      setDictCounts(prev => ({ ...prev, [category]: (prev[category] || 1) - 1 }));
+    } catch (e) { console.error('Remove error', e); }
+  };
+
+  const clearDictCat = async (category) => {
+    if (!window.confirm(`${category} ki saari vocabulary delete kardein?`)) return;
+    try {
+      await axios.post(`${API}/api/dictionary/clear`, { category }, dictAuthOpts());
+      setDict(prev => ({ ...prev, [category]: [] }));
+      setDictCounts(prev => ({ ...prev, [category]: 0 }));
+      setDictMsg(`🗑️ ${category} clear ho gayi`);
+    } catch (e) { console.error('Clear error', e); }
+  };
 
   // ── Convert Functions ──
   const handleDrop = useCallback(e => {
@@ -664,6 +738,14 @@ export default function App() {
               >
                 📋 فہارس
               </button>
+              {user.email === ADMIN_EMAIL && (
+                <button
+                  className={`tab ${mode === 'dictionary' ? 'active' : ''}`}
+                  onClick={() => { setMode('dictionary'); loadDict(); }}
+                >
+                  📖 لغت
+                </button>
+              )}
             </div>
 
             {/* Convert Tab */}
@@ -1140,6 +1222,83 @@ export default function App() {
                     </button>
                   </div>
                 )}
+              </section>
+            )}
+
+            {/* Dictionary Tab */}
+            {mode === 'dictionary' && user.email === ADMIN_EMAIL && (
+              <section className="section">
+                <h1>📖 لغت / Vocabulary</h1>
+                <p>System ko sikhao kaunse alfaaz شخصیت، مقام، کتاب یا زبان hain — taake فہارس behtar bane</p>
+
+                {/* Category selector */}
+                <div className="dict-cats">
+                  {['شخصیات','اماکن','کتابیں','زبانیں'].map(c => (
+                    <button
+                      key={c}
+                      className={`dict-cat-btn ${dictCat === c ? 'active' : ''}`}
+                      onClick={() => setDictCat(c)}
+                    >
+                      {c} <span className="dict-cat-count">{dictCounts[c] ?? 0}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Add by paste */}
+                <div className="dict-add-card">
+                  <label className="dict-label">
+                    "{dictCat}" mein alfaaz add karo (har lafz nai line par ya comma se):
+                  </label>
+                  <textarea
+                    className="dict-textarea"
+                    value={dictText}
+                    onChange={e => setDictText(e.target.value)}
+                    placeholder={`مثال:\nعلامہ اقبال\nمرزا غالب\nسرسید احمد خان`}
+                    dir="rtl"
+                    rows={5}
+                  />
+                  <div className="dict-actions">
+                    <button className="btn-primary" onClick={addDictText} disabled={dictBusy || !dictText.trim()}>
+                      ➕ Add karo
+                    </button>
+                    <button className="btn-secondary" onClick={() => dictFileRef.current.click()} disabled={dictBusy}>
+                      📂 File se import (.txt / Word)
+                    </button>
+                    <input
+                      ref={dictFileRef}
+                      type="file"
+                      accept=".txt,.docx,.doc"
+                      style={{ display: 'none' }}
+                      onChange={e => { if (e.target.files[0]) uploadDictFile(e.target.files[0]); e.target.value=''; }}
+                    />
+                  </div>
+                  {dictMsg && <div className="dict-msg">{dictMsg}</div>}
+                  {dictBusy && <div className="dict-msg">⏳ Processing...</div>}
+                </div>
+
+                {/* Term list */}
+                <div className="dict-list-card">
+                  <div className="dict-list-hdr">
+                    <h3>{dictCat} — {(dict[dictCat] || []).length} alfaaz</h3>
+                    {(dict[dictCat] || []).length > 0 && (
+                      <button className="dict-clear-btn" onClick={() => clearDictCat(dictCat)}>
+                        🗑️ Sab clear karo
+                      </button>
+                    )}
+                  </div>
+                  <div className="dict-chips">
+                    {(dict[dictCat] || []).length === 0 ? (
+                      <div className="dict-empty">Abhi koi lafz nahi. Upar add karo ya file import karo.</div>
+                    ) : (
+                      (dict[dictCat] || []).map((term, i) => (
+                        <span className="dict-chip" key={i} dir="rtl">
+                          {term}
+                          <button className="dict-chip-x" onClick={() => removeDictTerm(dictCat, term)}>✕</button>
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
               </section>
             )}
 

@@ -82,6 +82,52 @@ function trackEvent(type, user, details = '') {
 
 loadAnalytics();
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CUSTOM DICTIONARY (user-taught vocabulary for فہارس detection)
+// User uploads word-lists so the system learns which words are personalities,
+// places, books, languages — supplements the built-in lists.
+// ═══════════════════════════════════════════════════════════════════════════
+const DICT_PATH = path.join(__dirname, 'data', 'dictionary.json');
+const DICT_CATS = ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں'];
+
+let customDict = { شخصیات: [], اماکن: [], کتابیں: [], زبانیں: [] };
+
+function loadDictionary() {
+  try {
+    if (fs.existsSync(DICT_PATH)) {
+      const d = JSON.parse(fs.readFileSync(DICT_PATH, 'utf8'));
+      for (const c of DICT_CATS) customDict[c] = Array.isArray(d[c]) ? d[c] : [];
+    }
+  } catch (e) { console.error('Dictionary load error:', e.message); }
+}
+
+function saveDictionary() {
+  try {
+    const dir = path.dirname(DICT_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DICT_PATH, JSON.stringify(customDict));
+  } catch (e) { console.error('Dictionary save error:', e.message); }
+}
+
+// Add an array of terms to a category (dedupe, trim, drop blanks/too-short)
+function addDictTerms(category, terms) {
+  if (!DICT_CATS.includes(category)) return 0;
+  const existing = new Set(customDict[category]);
+  let added = 0;
+  for (let t of terms) {
+    if (typeof t !== 'string') continue;
+    t = t.replace(/[۔،؟!:؛"'()\[\]{}]/g, '').trim().replace(/\s+/g, ' ');
+    if (t.length < 2 || existing.has(t)) continue;
+    existing.add(t);
+    customDict[category].push(t);
+    added++;
+  }
+  if (added > 0) saveDictionary();
+  return added;
+}
+
+loadDictionary();
+
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
 app.use(express.json());
 app.use(session({
@@ -1197,6 +1243,18 @@ function extractFromPage(text, pageNum) {
     if (text.includes(lang)) found.زبانیں.add(lang);
   }
 
+  // ── 8. Custom dictionary (user-taught vocabulary) ────────────────────────
+  // Single-word terms must match a standalone token; multi-word use substring
+  for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
+    for (const term of customDict[cat]) {
+      if (term.includes(' ')) {
+        if (text.includes(term)) found[cat].add(term);
+      } else if (words.includes(term)) {
+        found[cat].add(term);
+      }
+    }
+  }
+
   return found;
 }
 
@@ -1603,6 +1661,80 @@ app.get('/api/admin/users', isAdmin, (req, res) => {
 app.get('/api/admin/activity', isAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 200);
   res.json({ activity: analytics.recentActivity.slice(0, limit) });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DICTIONARY API (user-taught vocabulary for فہارس)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Get current dictionary (counts + terms)
+app.get('/api/dictionary', requireAuth, (req, res) => {
+  const counts = {};
+  for (const c of DICT_CATS) counts[c] = customDict[c].length;
+  res.json({ dictionary: customDict, counts });
+});
+
+// Add terms (pasted text — newline/comma separated) to a category
+app.post('/api/dictionary/add', requireAuth, (req, res) => {
+  const { category, text } = req.body;
+  if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
+  const terms = String(text || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  const added = addDictTerms(category, terms);
+  res.json({ added, total: customDict[category].length });
+});
+
+// Dedicated uploader for dictionary files (allows .txt in addition to Word)
+const dictUpload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = file.mimetype === 'text/plain' || WORD_MIMES.has(file.mimetype)
+      || /\.(txt|docx|doc)$/i.test(file.originalname || '');
+    ok ? cb(null, true) : cb(new Error('Sirf .txt ya Word file allowed hai'));
+  }
+});
+
+// Upload a document (txt / Word) — every line becomes a term in the category
+app.post('/api/dictionary/upload', requireAuth, dictUpload.single('file'), async (req, res) => {
+  try {
+    const category = req.body.category;
+    if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
+    if (!req.file) return res.status(400).json({ error: 'File chahiye' });
+
+    let raw = '';
+    if (WORD_MIMES.has(req.file.mimetype)) {
+      const pages = await extractWordText(req.file.path);
+      raw = pages.map(p => p.text).join('\n');
+    } else {
+      raw = fs.readFileSync(req.file.path, 'utf8');
+    }
+    try { fs.unlinkSync(req.file.path); } catch (e) {}
+
+    const terms = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const added = addDictTerms(category, terms);
+    res.json({ added, total: customDict[category].length });
+  } catch (e) {
+    console.error('Dictionary upload error:', e.message);
+    res.status(500).json({ error: 'Upload fail: ' + e.message });
+  }
+});
+
+// Remove a single term
+app.post('/api/dictionary/remove', requireAuth, (req, res) => {
+  const { category, term } = req.body;
+  if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
+  customDict[category] = customDict[category].filter(t => t !== term);
+  saveDictionary();
+  res.json({ total: customDict[category].length });
+});
+
+// Clear an entire category
+app.post('/api/dictionary/clear', requireAuth, (req, res) => {
+  const { category } = req.body;
+  if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
+  customDict[category] = [];
+  saveDictionary();
+  res.json({ total: 0 });
 });
 
 // ─── Server Start ────────────────────────────────────────────────────────────
