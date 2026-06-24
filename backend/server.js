@@ -1810,7 +1810,14 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN API
 // ═══════════════════════════════════════════════════════════════════════════
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'alphacoders930@gmail.com';
+// Multiple admins supported (comma-separated in ADMIN_EMAIL env, plus defaults)
+const ADMIN_EMAILS = new Set(
+  [
+    ...(process.env.ADMIN_EMAIL || '').split(',').map(s => s.trim().toLowerCase()),
+    'alphacoders930@gmail.com',
+    'inayatmalik@gmail.com',
+  ].filter(Boolean)
+);
 
 const isAdmin = (req, res, next) => {
   let email = req.session.user?.email;
@@ -1820,7 +1827,9 @@ const isAdmin = (req, res, next) => {
       try { email = JSON.parse(Buffer.from(xuHeader, 'base64').toString())?.email; } catch (e) {}
     }
   }
-  if (!email || email !== ADMIN_EMAIL) return res.status(403).json({ error: 'Access denied' });
+  if (!email || !ADMIN_EMAILS.has(email.toLowerCase())) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   next();
 };
 

@@ -16,7 +16,8 @@ export default function App() {
   const [adminUsers, setAdminUsers] = useState(null);
   const [adminActivity, setAdminActivity] = useState(null);
   const [adminLoading, setAdminLoading] = useState(false);
-  const ADMIN_EMAIL = 'alphacoders930@gmail.com';
+  const ADMIN_EMAILS = ['alphacoders930@gmail.com', 'inayatmalik@gmail.com'];
+  const isAdminUser = !!user && ADMIN_EMAILS.includes((user.email || '').toLowerCase());
 
   // Dictionary State
   const [dict, setDict] = useState({ شخصیات: [], اماکن: [], کتابیں: [], زبانیں: [] });
@@ -722,7 +723,7 @@ export default function App() {
           </div>
           {user && (
             <div className="user-pill">
-              {user.email === ADMIN_EMAIL && (
+              {isAdminUser && (
                 <button className="btn-admin" onClick={openAdmin} title="Admin Panel">
                   ⚙️ Admin
                 </button>
@@ -774,7 +775,7 @@ export default function App() {
               >
                 📋 فہارس
               </button>
-              {user.email === ADMIN_EMAIL && (
+              {isAdminUser && (
                 <button
                   className={`tab ${mode === 'dictionary' ? 'active' : ''}`}
                   onClick={() => { setMode('dictionary'); loadDict(); }}
@@ -1327,7 +1328,7 @@ export default function App() {
             )}
 
             {/* Dictionary Tab */}
-            {mode === 'dictionary' && user.email === ADMIN_EMAIL && (
+            {mode === 'dictionary' && isAdminUser && (
               <section className="section">
                 <h1>📖 لغت / Vocabulary</h1>
                 <p>System ko sikhao kaunse alfaaz شخصیت، مقام، کتاب یا زبان hain — taake فہارس behtar bane</p>
