@@ -10,6 +10,22 @@ export default function App() {
   const [mode, setMode] = useState('convert');
   const [dragOver, setDragOver] = useState(false);
 
+  // Theme (light/dark)
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+  const toggleTheme = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'));
+
+  // Toast notifications
+  const [toasts, setToasts] = useState([]);
+  const addToast = useCallback((message, type = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
+  }, []);
+
   // Admin State
   const [adminMode, setAdminMode] = useState(false);
   const [adminStats, setAdminStats] = useState(null);
@@ -345,11 +361,13 @@ export default function App() {
         if (d.status === 'done') {
           clearInterval(convertTimerRef.current);
           setConvertUrl(d.downloadUrl);
+          addToast('✅ Conversion complete — Word file taiyaar!', 'success');
           es.close();
         }
         if (d.status === 'error') {
           clearInterval(convertTimerRef.current);
           setConvertError(d.message);
+          addToast('Conversion fail ho gayi', 'error');
           es.close();
         }
       };
@@ -457,9 +475,16 @@ export default function App() {
 
       setSearchResults(data);
       setSearchError(null);
+      addToast(
+        data.results.length > 0
+          ? `🔍 ${data.results.length} صفحات پر ملا (${data.totalMatches} بار)`
+          : 'Lafz nahi mila',
+        data.results.length > 0 ? 'success' : 'info'
+      );
     } catch (e) {
       setSearchError(e.response?.data?.error || 'Search fail');
       setSearchResults(null);
+      addToast('Search fail ho gayi', 'error');
     } finally {
       setSearching(false);
     }
@@ -655,10 +680,12 @@ export default function App() {
           setFiharisUrl(d.downloadUrl);
           setFiharisStats(d.stats);
           setFiharisGenProg(null);
+          addToast('✅ فہارس تیار ہو گئی!', 'success');
           es.close();
         } else if (d.status === 'error') {
           clearInterval(fiharisGenTimerRef.current);
           setFiharisError(d.message || 'Generate fail');
+          addToast('فہارس بنانے میں مسئلہ', 'error');
           setFiharisGenProg(null);
           es.close();
         }
@@ -735,20 +762,25 @@ export default function App() {
               <div className="logo-en">Urdu PDF Pro</div>
             </div>
           </div>
-          {user && (
-            <div className="user-pill">
-              {isAdminUser && (
-                <button className="btn-admin" onClick={openAdmin} title="Admin Panel">
-                  ⚙️ Admin
+          <div className="header-actions">
+            <button className="btn-theme" onClick={toggleTheme} title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
+            {user && (
+              <div className="user-pill">
+                {isAdminUser && (
+                  <button className="btn-admin" onClick={openAdmin} title="Admin Panel">
+                    ⚙️ Admin
+                  </button>
+                )}
+                <img src={user.picture} alt="" className="user-av" />
+                <span>{user.name.split(' ')[0]}</span>
+                <button className="btn-logout" onClick={logout}>
+                  ↩ Logout
                 </button>
-              )}
-              <img src={user.picture} alt="" className="user-av" />
-              <span>{user.name.split(' ')[0]}</span>
-              <button className="btn-logout" onClick={logout}>
-                ↩ Logout
-              </button>
-            </div>
-          )}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -858,6 +890,19 @@ export default function App() {
         ) : (
           // App Content
           <div className="app-container">
+            {/* Welcome banner */}
+            <div className="welcome-banner">
+              <div className="welcome-text">
+                <span className="welcome-hi">السلام علیکم، {user.name.split(' ')[0]} 👋</span>
+                <span className="welcome-sub">Aaj kya karna hai? Neeche se tool chuniye.</span>
+              </div>
+              <div className="welcome-quick">
+                <button className={`wq ${mode==='convert'?'on':''}`} onClick={() => setMode('convert')}>📄 Convert</button>
+                <button className={`wq ${mode==='search'?'on':''}`} onClick={() => setMode('search')}>🔍 Search</button>
+                <button className={`wq ${mode==='fiharis'?'on':''}`} onClick={() => setMode('fiharis')}>📋 فہارس</button>
+              </div>
+            </div>
+
             {/* Mode Tabs */}
             <div className="mode-tabs">
               <button
@@ -1512,9 +1557,51 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="footer">
-        <span>© Urdu PDF Pro 2026</span> • <span>Made with ❤️</span>
+      <footer className="footer-rich">
+        <div className="footer-inner">
+          <div className="footer-col footer-brand">
+            <div className="footer-logo">📖 اردو PDF Pro</div>
+            <p>Urdu documents ke liye Convert, Search aur فہارس — sab ek hi jagah, 100% free.</p>
+          </div>
+          <div className="footer-col">
+            <h4>Tools</h4>
+            <span>📄 PDF/Word to Word</span>
+            <span>🔍 Word Search + Report</span>
+            <span>📋 فہارس / Index</span>
+            <span>🎯 میری فہرست (100%)</span>
+          </div>
+          <div className="footer-col">
+            <h4>Features</h4>
+            <span>🔤 Urdu OCR (scanned PDF)</span>
+            <span>📕 PDF & Word reports</span>
+            <span>📖 Custom dictionary</span>
+            <span>🌙 Dark mode</span>
+          </div>
+          <div className="footer-col">
+            <h4>Info</h4>
+            <span>🔒 Secure Google login</span>
+            <span>⚡ Fast & reliable</span>
+            <span>🆓 No watermark</span>
+          </div>
+        </div>
+        <div className="footer-bottom">
+          <span>© Urdu PDF Pro 2026</span> • <span>Made with ❤️ for Urdu readers</span>
+        </div>
       </footer>
+
+      {/* ── Toasts ── */}
+      {toasts.length > 0 && (
+        <div className="toast-wrap">
+          {toasts.map(t => (
+            <div key={t.id} className={`toast toast-${t.type}`}>
+              <span className="toast-ic">
+                {t.type === 'success' ? '✅' : t.type === 'error' ? '⚠️' : 'ℹ️'}
+              </span>
+              <span>{t.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ── Admin Panel Modal ── */}
       {adminMode && (
