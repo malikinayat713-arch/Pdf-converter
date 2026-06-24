@@ -1083,6 +1083,30 @@ const LANGUAGE_NAMES = new Set([
   'یونانی','اطالوی','ہسپانوی','پرتگیزی','ڈچ','سویڈش','ناروے',
 ]);
 
+// Well-known personalities — detected even WITHOUT an honorific prefix.
+// (single-word names like اقبال، غالب appear constantly in Urdu books)
+const FAMOUS_NAMES = new Set([
+  // Poets / literary
+  'اقبال','غالب','میر','فیض','فراز','جوش','حالی','اکبر الہ آبادی','داغ',
+  'ذوق','مومن','انیس','دبیر','نظیر','جگر','ناصر','منٹو','پریم چند','فردوسی',
+  'سعدی','حافظ','رومی','خیام','جامی','عطار','نظامی','امیر خسرو','بیدل',
+  // Religious / historical figures
+  'ابوبکر','عمر','عثمان','علی','حسن','حسین','فاطمہ','عائشہ','خدیجہ','بلال',
+  'ابوحنیفہ','امام شافعی','امام مالک','احمد بن حنبل','بخاری','امام مسلم',
+  'غزالی','ابن تیمیہ','ابن خلدون','ابن سینا','رازی','فارابی','طبری','ابن رشد',
+  'شاہ ولی اللہ','سرسید','مودودی','اشرف علی تھانوی','اقبال لاہوری',
+  // Rulers / politicians
+  'جناح','قائداعظم','لیاقت علی خان','بابر','ہمایوں','اکبر','جہانگیر',
+  'شاہجہاں','اورنگزیب','ٹیپو سلطان','محمود غزنوی','محمد بن قاسم',
+  'صلاح الدین','نور الدین زنگی','ہارون الرشید','مامون الرشید',
+]);
+
+// Words that come AFTER a name (so the word before is a personality)
+const HONORIFIC_SUFFIX = new Set([
+  'صاحب','شہید','مرحوم','رحمہ','رحمۃ','علیہ','رضی','قدس','نوراللہ',
+  'دامت','مدظلہ','سلمہ','بادشاہ','سلطان','خان','شاہ','بیگ','الدین',
+]);
+
 // ─── Extract entities from a single page's text (rule-based) ─────────────────
 function extractFromPage(text, pageNum) {
   if (!text || text.length < 10) return null;
@@ -1090,7 +1114,7 @@ function extractFromPage(text, pageNum) {
   const words = text.split(/\s+/).map(w => w.replace(/[۔،؟!:؛\-\.,"'()[\]{}]/g, '').trim()).filter(Boolean);
   const found = { شخصیات: new Set(), اماکن: new Set(), کتابیں: new Set(), زبانیں: new Set() };
 
-  // ── 1. Personalities via honorifics ──────────────────────────────────────
+  // ── 1a. Personalities via honorific PREFIX (e.g. علامہ اقبال) ─────────────
   for (let i = 0; i < words.length; i++) {
     if (HONORIFICS.includes(words[i])) {
       const parts = [words[i]];
@@ -1101,6 +1125,31 @@ function extractFromPage(text, pageNum) {
         if (parts.length >= 4) break;
       }
       if (parts.length >= 2) found.شخصیات.add(parts.join(' '));
+    }
+  }
+
+  // ── 1b. Personalities via honorific SUFFIX (e.g. اقبال صاحب، علی رضی) ─────
+  for (let i = 1; i < words.length; i++) {
+    if (HONORIFIC_SUFFIX.has(words[i])) {
+      const prev = words[i - 1];
+      if (prev && !NAME_STOP.has(prev) && prev.length >= 3 && !HONORIFICS.includes(prev)) {
+        // include the word before prev too, if it's also a name-like token
+        const prev2 = words[i - 2];
+        const name = (prev2 && !NAME_STOP.has(prev2) && prev2.length >= 3 && !HONORIFICS.includes(prev2))
+          ? `${prev2} ${prev}` : prev;
+        found.شخصیات.add(name);
+      }
+    }
+  }
+
+  // ── 1c. Well-known personalities (exact match, no honorific needed) ───────
+  for (const name of FAMOUS_NAMES) {
+    if (name.includes(' ')) {
+      // multi-word name → substring match
+      if (text.includes(name)) found.شخصیات.add(name);
+    } else {
+      // single word → must be a standalone token (avoid partial matches)
+      if (words.includes(name)) found.شخصیات.add(name);
     }
   }
 
@@ -1187,6 +1236,76 @@ function buildEntityIndex(pages) {
 // ─── Urdu numerals helper ─────────────────────────────────────────────────────
 function toUrduNum(n) {
   return String(n).replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+}
+
+// Convert any Urdu/Arabic numerals in a string to Latin digits
+function numeralsToLatin(s) {
+  return s
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+}
+
+// Detect a printed/standalone page number near the top or bottom of a page's text.
+// Urdu books print the page number on its own line (e.g. "۲۱"); we use that as the
+// REAL page number instead of the sequential document index.
+function detectPrintedPageNumber(text) {
+  if (!text) return null;
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+
+  // Look at the first 2 and last 2 non-empty lines (where page numbers live)
+  const edges = [lines[0], lines[1], lines[lines.length - 1], lines[lines.length - 2]]
+    .filter(Boolean);
+
+  for (const line of edges) {
+    const latin = numeralsToLatin(line);
+    // The line must contain ONLY digits + light decoration (dashes, dots, brackets,
+    // urdu punctuation, spaces). If it contains any letter, it's not a page marker.
+    if (/[^\d\s\-–—.\[\](){}۔،:؛]/.test(latin)) continue;
+    const digits = latin.replace(/[^\d]/g, '');
+    if (digits.length >= 1 && digits.length <= 4) {
+      const n = parseInt(digits, 10);
+      if (n >= 1 && n <= 4000) return n;
+    }
+  }
+  return null;
+}
+
+// Build a map: sequential page index → real (printed) page number.
+// Only uses printed numbers if enough pages have them AND they form an
+// increasing sequence; otherwise falls back to the sequential index.
+function buildPageNumberMap(pages) {
+  const candidates = pages.map(p => ({ seq: p.pageNum, printed: detectPrintedPageNumber(p.text) }));
+  const detected = candidates.filter(c => c.printed !== null);
+
+  let increasing = 0;
+  for (let i = 1; i < detected.length; i++) {
+    if (detected[i].printed > detected[i - 1].printed) increasing++;
+  }
+  const usable =
+    detected.length >= Math.max(3, Math.floor(pages.length * 0.35)) &&
+    (detected.length < 2 || increasing >= (detected.length - 1) * 0.6);
+
+  const map = {};
+  if (!usable) {
+    for (const c of candidates) map[c.seq] = c.seq;
+    return { map, usable: false };
+  }
+
+  // Use detected numbers; interpolate the gaps from the last known printed number
+  let lastPrinted = null, lastSeq = null;
+  for (const c of candidates) {
+    if (c.printed !== null) {
+      map[c.seq] = c.printed;
+      lastPrinted = c.printed;
+      lastSeq = c.seq;
+    } else if (lastPrinted !== null) {
+      map[c.seq] = lastPrinted + (c.seq - lastSeq);
+    } else {
+      map[c.seq] = c.seq; // before the first detected number
+    }
+  }
+  return { map, usable: true };
 }
 
 // ─── Build فہارس Word Document ────────────────────────────────────────────────
@@ -1346,6 +1465,10 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
         const total = cached.pages.length;
         update(10, `📚 ${total} pages analyze ho rahi hain...`);
 
+        // Detect real (printed) page numbers so the فہارس matches the book exactly
+        const { map: pageMap, usable: usablePageNums } = buildPageNumberMap(cached.pages);
+        console.log(`📄 Page numbers: ${usablePageNums ? 'using PRINTED numbers from book' : 'using sequential index'}`);
+
         // Process in chunks so we can emit progress
         const CHUNK = 20;
         const index = { شخصیات: {}, اماکن: {}, کتابیں: {}, زبانیں: {} };
@@ -1353,14 +1476,15 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
         for (let i = 0; i < cached.pages.length; i += CHUNK) {
           const slice = cached.pages.slice(i, i + CHUNK);
           for (const { pageNum, text } of slice) {
-            const found = extractFromPage(text, pageNum);
+            const realPage = pageMap[pageNum] || pageNum;
+            const found = extractFromPage(text, realPage);
             if (!found) continue;
             for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
               for (const name of found[cat]) {
                 const key = name.trim();
                 if (!key || key.length < 2) continue;
                 if (!index[cat][key]) index[cat][key] = new Set();
-                index[cat][key].add(pageNum);
+                index[cat][key].add(realPage);
               }
             }
           }
