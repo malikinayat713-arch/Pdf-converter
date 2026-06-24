@@ -468,6 +468,63 @@ function normalizeUrdu(str) {
     .trim();
 }
 
+// Reusable search over a cached document (used by the search endpoint + AI assistant)
+function runSearch(cached, searchTerm) {
+  const needle = normalizeUrdu(searchTerm);
+  if (!needle) return { searchTerm, totalMatches: 0, results: [] };
+
+  if (!cached.pageMap) cached.pageMap = buildPageNumberMap(cached.pages).map;
+  const pageMap = cached.pageMap;
+
+  const results = [];
+  let totalMatches = 0;
+  cached.pages.forEach(({ pageNum, text }) => {
+    if (!text || text.length === 0) return;
+    const hay = normalizeUrdu(text);
+    let matchCount = 0, idx = 0;
+    while ((idx = hay.indexOf(needle, idx)) !== -1) { matchCount++; idx += needle.length; }
+    if (matchCount > 0) {
+      const firstIdx = hay.indexOf(needle);
+      const startIdx = Math.max(0, firstIdx - 50);
+      const endIdx = Math.min(text.length, firstIdx + needle.length + 50);
+      const snippet = text.substring(startIdx, endIdx).replace(/\s+/g, ' ').trim();
+      results.push({
+        pageNum: pageMap[pageNum] || pageNum,
+        matchCount,
+        snippet: snippet ? `…${snippet}…` : '[preview nahi]'
+      });
+      totalMatches += matchCount;
+    }
+  });
+  return { searchTerm, totalMatches, results };
+}
+
+// Generate spelling/honorific variants of a term to help when nothing is found
+function searchVariants(term) {
+  const base = (term || '').trim();
+  const set = new Set();
+  const HONS = ['علامہ','حضرت','مولانا','مرزا','میر','سید','ڈاکٹر','شیخ','حافظ','مولوی','پروفیسر','سر','مسٹر','قاضی','مفتی','امام','خواجہ','پیر'];
+  const words = base.split(/\s+/).filter(Boolean);
+  if (words.length > 1) {
+    if (HONS.includes(words[0])) set.add(words.slice(1).join(' '));     // drop leading title
+    set.add(words[words.length - 1]);                                   // last name alone
+    set.add(words[0]);                                                  // first word
+    HONS.forEach(h => set.add(`${h} ${words[words.length - 1]}`));      // title + last name
+  }
+  return [...set].filter(v => v && v.length >= 2 && normalizeUrdu(v) !== normalizeUrdu(base));
+}
+
+// Search with automatic variant fallback (returns best result + what was tried)
+function smartSearch(cached, term) {
+  const direct = runSearch(cached, term);
+  if (direct.totalMatches > 0) return { matchedTerm: term, viaVariant: false, ...direct };
+  for (const v of searchVariants(term)) {
+    const r = runSearch(cached, v);
+    if (r.totalMatches > 0) return { matchedTerm: v, viaVariant: true, original: term, ...r };
+  }
+  return { matchedTerm: term, viaVariant: false, totalMatches: 0, results: [], triedVariants: searchVariants(term) };
+}
+
 // ─── PDF Search Endpoint ─────────────────────────────────────────────────────
 app.post('/api/pdf/search', requireAuth, (req, res) => {
   try {
@@ -478,49 +535,10 @@ app.post('/api/pdf/search', requireAuth, (req, res) => {
     if (!cached) return res.status(404).json({ error: 'PDF cache expire hogaya' });
 
     console.log(`🔍 Searching "${searchTerm}" in ${cached.pages.length} pages`);
-
-    const needle = normalizeUrdu(searchTerm);
-    if (!needle) return res.json({ searchTerm, totalMatches: 0, results: [] });
-
-    // Real (printed) page numbers so results match the book exactly (cached once)
-    if (!cached.pageMap) cached.pageMap = buildPageNumberMap(cached.pages).map;
-    const pageMap = cached.pageMap;
-
-    const results = [];
-    let totalMatches = 0;
-
-    cached.pages.forEach(({ pageNum, text }) => {
-      if (!text || text.length === 0) return;
-
-      const hay = normalizeUrdu(text);
-
-      // Count all occurrences on the normalized text
-      let matchCount = 0;
-      let idx = 0;
-      while ((idx = hay.indexOf(needle, idx)) !== -1) {
-        matchCount++;
-        idx += needle.length;
-      }
-
-      if (matchCount > 0) {
-        // Snippet from the ORIGINAL text near the first match in normalized text.
-        const firstIdx = hay.indexOf(needle);
-        const startIdx = Math.max(0, firstIdx - 50);
-        const endIdx = Math.min(text.length, firstIdx + needle.length + 50);
-        const snippet = text.substring(startIdx, endIdx).replace(/\s+/g, ' ').trim();
-
-        results.push({
-          pageNum: pageMap[pageNum] || pageNum,
-          matchCount,
-          snippet: snippet ? `…${snippet}…` : '[preview nahi]'
-        });
-        totalMatches += matchCount;
-      }
-    });
-
-    console.log(`✅ Found on ${results.length} pages, ${totalMatches} total matches`);
-    trackEvent('searches', req.session.user, `"${searchTerm}" — ${totalMatches} matches`);
-    res.json({ searchTerm, totalMatches, results });
+    const out = runSearch(cached, searchTerm);
+    console.log(`✅ Found on ${out.results.length} pages, ${out.totalMatches} total matches`);
+    trackEvent('searches', req.session.user, `"${searchTerm}" — ${out.totalMatches} matches`);
+    res.json(out);
   } catch (e) {
     console.error('Search error:', e);
     res.status(500).json({ error: 'Search fail: ' + e.message });
@@ -1804,6 +1822,192 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
     res.json({ jobId });
   } catch (e) {
     res.status(500).json({ error: 'Index start fail: ' + e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI ASSISTANT (free) — chat that can search the user's document, help when a
+// word isn't found (tries spelling variants), and guide the whole website.
+// Uses Groq's free API if GROQ_API_KEY is set; otherwise a built-in rule-based
+// assistant so it works with zero setup.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Generate likely spelling/title variants when a search returns nothing
+function buildSearchVariants(term) {
+  const out = new Set();
+  const words = String(term).trim().split(/\s+/).filter(Boolean);
+  if (words.length > 1) {
+    if (HONORIFICS.includes(words[0])) out.add(words.slice(1).join(' '));
+    out.add(words[words.length - 1]);            // last word (often the takhallus/surname)
+    out.add(words[0]);                            // first word
+    if (words.length > 2) out.add(`${words[0]} ${words[words.length - 1]}`);
+  }
+  out.add(`علامہ ${term}`);
+  out.add(`حضرت ${term}`);
+  out.add(`مولانا ${term}`);
+  out.delete(term);
+  return [...out].filter(Boolean).slice(0, 8);
+}
+
+// Search the currently-loaded document; auto-tries variants if nothing found
+function assistantSearch(pdfId, term) {
+  const cached = pdfId && pdfCache.get(pdfId);
+  if (!cached) {
+    return { found: false, noDocument: true,
+      message: 'Abhi koi file load nahi hai. Pehle Search ya فہارس tab mein file upload karein, phir main usme dhoond sakta hoon.' };
+  }
+  if (!cached.pageMap) cached.pageMap = buildPageNumberMap(cached.pages).map;
+
+  const run = (t) => {
+    const needle = normalizeUrdu(t);
+    if (!needle) return { pages: [], total: 0 };
+    const pages = []; let total = 0;
+    for (const { pageNum, text } of cached.pages) {
+      if (!text) continue;
+      const hay = normalizeUrdu(text);
+      let c = 0, idx = 0;
+      while ((idx = hay.indexOf(needle, idx)) !== -1) { c++; idx += needle.length; }
+      if (c > 0) { pages.push(cached.pageMap[pageNum] || pageNum); total += c; }
+    }
+    return { pages: [...new Set(pages)].sort((a, b) => a - b), total };
+  };
+
+  let res = run(term), usedVariant = null;
+  if (res.total === 0) {
+    for (const v of buildSearchVariants(term)) {
+      const r = run(v);
+      if (r.total > 0) { res = r; usedVariant = v; break; }
+    }
+  }
+  return {
+    found: res.total > 0,
+    term, usedVariant,
+    pages: res.pages.map(toUrduNum),
+    pagesRaw: res.pages,
+    totalMatches: res.total,
+    fileName: cached.fileName || '',
+  };
+}
+
+const ASSISTANT_SYSTEM = `Tum "Urdu PDF Pro" website ke madadgar AI assistant ho.
+Roman Urdu (aur zaroorat ho to Urdu) mein dosti-bhare, mukhtasar jawab do.
+
+Website ke features jin mein tum user ki rehnumai karte ho:
+- 📄 Convert: PDF/Image/Word ko saaf Urdu Word file banata hai (scanned ke liye OCR). Convert tab mein file upload karke "Convert Karo" dabayein.
+- 🔍 Search: kisi lafz ko poori file mein dhoondta hai aur har صفحہ نمبر deta hai. PDF/Word report bhi download hoti hai.
+- 📋 فہارس (Index): شخصیات، اماکن، کتابیں، زبانیں ki fehrist banata hai. "میری فہرست" mode mein user apne naam de to 100% exact pages milte hain.
+- 📖 لغت (Dictionary, sirf admin): naam sikhata hai taake فہارس behtar bane.
+
+Tumhare paas "search_in_document" tool hai. Jab bhi user kuch dhoondhna/find karna chahe (jaise "iqbal find karo", "ye lafz nahi mila"), to ye tool use karo.
+Agar lafz na mile to tool khud milti julti spelling (variants) try karta hai — user ko batao ke kis spelling se mila.
+Agar koi file load na ho to user ko file upload karne ko kaho.
+Convert/فہارس jaise lambay kaam ke liye user ko sahi tab aur steps batao.`;
+
+async function groqChat(messages, tools) {
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      messages, tools, temperature: 0.3, max_tokens: 800,
+    }),
+  });
+  if (!r.ok) throw new Error(`Groq ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// Rule-based fallback assistant (works without any API key)
+function ruleAssistant(userText, pdfId) {
+  const text = String(userText || '').trim();
+  const low = text.toLowerCase();
+  const findRe = /(?:find|search|dhoond[o0]?|talaash|talash|ڈھونڈ[ووو]?|تلاش|نکال)/i;
+
+  if (findRe.test(low)) {
+    // extract the term: quoted, or after the keyword/colon
+    let term = (text.match(/["'“”«»]([^"'“”«»]+)["'“”«»]/) || [])[1];
+    if (!term) term = (text.match(/(?:find|search|dhoond[o0]?|talaash|talash|تلاش|ڈھونڈو|نکالو)\s*[:\-]?\s*(.+)/i) || [])[1];
+    term = (term || '').replace(/\s+(kar[o0]?|karo|krdo|kr\s*do|please|plz)\s*$/i, '').trim();
+    if (!term) return 'Kya dhoondhna hai? Misaal: "اقبال find karo".';
+    const r = assistantSearch(pdfId, term);
+    if (r.noDocument) return r.message;
+    if (!r.found) return `"${term}" kisi صفحے par nahi mila — milti julti spelling bhi try ki. Shayad spelling alag ho? Aap لغت/فہارس bhi try kar sakte hain.`;
+    const via = r.usedVariant ? ` (spelling "${r.usedVariant}" se mila)` : '';
+    return `✅ "${term}"${via} ${toUrduNum(r.pagesRaw.length)} صفحات par mila (${toUrduNum(r.totalMatches)} بار):\nصفحات: ${r.pages.join('، ')}`;
+  }
+  if (/convert|word banao|word me|ورڈ/i.test(low))
+    return '📄 Convert ke liye: upar "Convert" tab kholein, PDF/Image/Word upload karein, phir "Convert Karo" dabayein — saaf Urdu Word file download ho jayegi.';
+  if (/فہارس|fihris|fiharis|index|fehrist|فہرست/i.test(low))
+    return '📋 فہارس ke liye: "فہارس" tab mein file upload karein. 100% درست pages ke liye "میری فہرست" mode chunein aur naam khud likhein.';
+  if (/لغت|dictionary|vocab/i.test(low))
+    return '📖 لغت (Dictionary) admin ke liye hai — wahan naam add karne se فہارس behtar banti hai.';
+  if (/salam|aoa|assalam|hello|hi|ہائے|سلام/i.test(low))
+    return 'وعلیکم السلام! 😊 Main Urdu PDF Pro ka assistant hoon. Convert, Search ya فہارس — kisi bhi cheez mein madad chahiye? "اقبال find karo" jaisa likhein.';
+  return 'Main aapki madad kar sakta hoon: file convert, lafz search (صفحہ نمبر ke saath), ya فہارس banane mein. Misaal: "علامہ اقبال find karo" ya "convert kaise karun?".';
+}
+
+app.post('/api/assistant/chat', requireAuth, async (req, res) => {
+  try {
+    const { messages, pdfId } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages chahiye' });
+    }
+    const history = messages.slice(-10).map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: String(m.content || ''),
+    }));
+    const lastUser = [...history].reverse().find(m => m.role === 'user');
+
+    // No key → rule-based assistant (still fully usable & free)
+    if (!process.env.GROQ_API_KEY) {
+      return res.json({ reply: ruleAssistant(lastUser?.content || '', pdfId), mode: 'rule' });
+    }
+
+    // Groq with tool-calling loop
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'search_in_document',
+        description: 'Search the user\'s currently loaded document for a word or name (Urdu) and return the pages where it appears. Use whenever the user wants to find/locate something.',
+        parameters: {
+          type: 'object',
+          properties: { term: { type: 'string', description: 'The word or name to find, in Urdu' } },
+          required: ['term'],
+        },
+      },
+    }];
+
+    let convo = [{ role: 'system', content: ASSISTANT_SYSTEM }, ...history];
+    for (let step = 0; step < 4; step++) {
+      const data = await groqChat(convo, tools);
+      const msg = data.choices?.[0]?.message;
+      if (!msg) break;
+      convo.push(msg);
+      if (msg.tool_calls && msg.tool_calls.length) {
+        for (const tc of msg.tool_calls) {
+          let result;
+          if (tc.function?.name === 'search_in_document') {
+            let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
+            result = assistantSearch(pdfId, args.term || '');
+          } else {
+            result = { error: 'unknown tool' };
+          }
+          convo.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result) });
+        }
+        continue;
+      }
+      return res.json({ reply: msg.content || '...', mode: 'ai' });
+    }
+    const last = convo[convo.length - 1];
+    return res.json({ reply: (last && last.content) || 'Maaf kijiye, dobara koshish karein.', mode: 'ai' });
+  } catch (e) {
+    console.error('Assistant error:', e.message);
+    // Graceful fallback to rule-based on any AI failure
+    try {
+      const last = [...(req.body.messages || [])].reverse().find(m => m.role === 'user');
+      return res.json({ reply: ruleAssistant(last?.content || '', req.body.pdfId), mode: 'rule-fallback' });
+    } catch (e2) {
+      return res.status(500).json({ error: 'Assistant fail' });
+    }
   }
 });
 

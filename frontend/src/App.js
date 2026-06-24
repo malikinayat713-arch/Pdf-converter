@@ -26,6 +26,39 @@ export default function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
   }, []);
 
+  // AI Assistant chat
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiMsgs, setAiMsgs] = useState([
+    { role: 'assistant', content: 'السلام علیکم! 😊 Main aapka AI assistant hoon. File convert, lafz search (صفحہ نمبر ke saath) ya فہارس — kisi bhi cheez mein madad chahiye? Misaal: "علامہ اقبال find karo".' }
+  ]);
+  const [aiInput, setAiInput] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const aiBodyRef = useRef();
+  const sendAssistant = async () => {
+    const text = aiInput.trim();
+    if (!text || aiBusy) return;
+    const next = [...aiMsgs, { role: 'user', content: text }];
+    setAiMsgs(next);
+    setAiInput('');
+    setAiBusy(true);
+    try {
+      const cfg = { withCredentials: true };
+      const t = localStorage.getItem('tokens');
+      if (t) { try { cfg.headers = { 'X-Tokens': JSON.stringify(JSON.parse(t)) }; } catch (e) {} }
+      const { data } = await axios.post(`${API}/api/assistant/chat`,
+        { messages: next.map(m => ({ role: m.role, content: m.content })), pdfId: pdfId || fiharisPdfId || null },
+        cfg);
+      setAiMsgs(m => [...m, { role: 'assistant', content: data.reply || '...' }]);
+    } catch (e) {
+      setAiMsgs(m => [...m, { role: 'assistant', content: '⚠️ Maaf kijiye, abhi jawab nahi de saka. Dobara koshish karein.' }]);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (aiBodyRef.current) aiBodyRef.current.scrollTop = aiBodyRef.current.scrollHeight;
+  }, [aiMsgs, aiOpen]);
+
   // 3D tilt — follows the mouse for a realistic depth effect
   const handleTilt = useCallback((e) => {
     const el = e.currentTarget;
@@ -1605,6 +1638,45 @@ export default function App() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* ── AI Assistant ── */}
+      {user && (
+        <>
+          <button
+            className={`ai-fab ${aiOpen ? 'open' : ''}`}
+            onClick={() => setAiOpen(o => !o)}
+            title="AI Assistant"
+          >
+            {aiOpen ? '✕' : '🤖'}
+          </button>
+          {aiOpen && (
+            <div className="ai-panel">
+              <div className="ai-head">
+                <span className="ai-head-title">🤖 AI Assistant</span>
+                <span className="ai-head-sub">Convert • Search • فہارس</span>
+                <button className="ai-close" onClick={() => setAiOpen(false)}>✕</button>
+              </div>
+              <div className="ai-body" ref={aiBodyRef}>
+                {aiMsgs.map((m, i) => (
+                  <div key={i} className={`ai-msg ai-${m.role}`}>{m.content}</div>
+                ))}
+                {aiBusy && <div className="ai-msg ai-assistant ai-typing">…سوچ رہا ہوں</div>}
+              </div>
+              <div className="ai-input-row">
+                <input
+                  className="ai-input"
+                  value={aiInput}
+                  onChange={e => setAiInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && sendAssistant()}
+                  placeholder="Likhein… jaise: اقبال find karo"
+                  disabled={aiBusy}
+                />
+                <button className="ai-send" onClick={sendAssistant} disabled={aiBusy || !aiInput.trim()}>➤</button>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Admin Panel Modal ── */}
