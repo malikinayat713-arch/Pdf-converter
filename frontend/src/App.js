@@ -744,7 +744,21 @@ export default function App() {
           // Login Screen
           <div className="login-wrap">
             <div className="login-card">
-              <span className="login-icon">📄</span>
+              {/* Realistic CSS 3D Urdu book */}
+              <div className="book3d-stage">
+                <div className="book3d">
+                  <div className="book3d__face book3d__front">
+                    <span className="book3d__emoji">📖</span>
+                    <span className="book3d__title">اردو</span>
+                    <span className="book3d__sub">PDF&nbsp;Pro</span>
+                  </div>
+                  <div className="book3d__face book3d__back" />
+                  <div className="book3d__face book3d__spine" />
+                  <div className="book3d__face book3d__pages" />
+                  <div className="book3d__face book3d__top" />
+                  <div className="book3d__face book3d__bottom" />
+                </div>
+              </div>
               <h1>اردو PDF</h1>
               <p>PDF Convert اور Search کریں</p>
               <button className="btn-google" onClick={() => (window.location.href = `${API}/auth/google`)}>

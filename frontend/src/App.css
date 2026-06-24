@@ -245,6 +245,111 @@ body {
   animation: float 3s ease-in-out infinite;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   REALISTIC CSS 3D BOOK (login hero)
+═══════════════════════════════════════════════════════════════════ */
+.book3d-stage {
+  perspective: 1500px;
+  display: flex;
+  justify-content: center;
+  margin: 6px 0 30px;
+  height: 250px;
+  align-items: center;
+  position: relative;
+}
+.book3d {
+  position: relative;
+  width: 170px;
+  height: 230px;
+  transform-style: preserve-3d;
+  transform: rotateX(8deg) rotateY(-28deg);
+  animation: book3dFloat 7s ease-in-out infinite;
+  cursor: pointer;
+}
+.book3d:hover { animation-play-state: paused; transform: rotateX(6deg) rotateY(-12deg) scale(1.04); transition: transform 0.6s cubic-bezier(.22,1,.36,1); }
+@keyframes book3dFloat {
+  0%, 100% { transform: rotateX(8deg) rotateY(-28deg) translateY(0); }
+  50%      { transform: rotateX(8deg) rotateY(-18deg) translateY(-16px); }
+}
+.book3d__face {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+}
+/* Front cover */
+.book3d__front {
+  width: 170px; height: 230px;
+  transform: translate(-50%, -50%) translateZ(19px);
+  background: linear-gradient(135deg, #4361ee 0%, #7c3aed 60%, #a855f7 100%);
+  border-radius: 4px 10px 10px 4px;
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.18), inset 6px 0 14px rgba(0,0,0,0.28);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; color: #fff; overflow: hidden;
+}
+.book3d__front::before {
+  content: ''; position: absolute; left: 10px; top: 0; bottom: 0; width: 4px;
+  background: rgba(255,255,255,0.25);
+}
+.book3d__front::after {
+  content: ''; position: absolute; inset: 14px; border: 1.5px solid rgba(255,255,255,0.35);
+  border-radius: 6px;
+}
+.book3d__emoji { font-size: 46px; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3)); z-index: 1; }
+.book3d__title {
+  font-family: 'Noto Nastaliq Urdu', serif; font-size: 30px; font-weight: 700;
+  line-height: 1; z-index: 1; text-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+.book3d__sub { font-size: 13px; letter-spacing: 2px; opacity: 0.9; z-index: 1; font-weight: 600; }
+/* Back cover */
+.book3d__back {
+  width: 170px; height: 230px;
+  transform: translate(-50%, -50%) translateZ(-19px) rotateY(180deg);
+  background: linear-gradient(135deg, #3a2db8, #5b21b6);
+  border-radius: 10px 4px 4px 10px;
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.08);
+}
+/* Spine (left) */
+.book3d__spine {
+  width: 38px; height: 230px;
+  transform: translate(-50%, -50%) rotateY(-90deg) translateZ(85px);
+  background: linear-gradient(90deg, #2c1f9e, #4733c9);
+  border-radius: 4px;
+  box-shadow: inset 0 0 8px rgba(0,0,0,0.4);
+}
+/* Page edge (right) — paper lines */
+.book3d__pages {
+  width: 38px; height: 224px;
+  transform: translate(-50%, -50%) rotateY(90deg) translateZ(85px);
+  background: repeating-linear-gradient(to bottom, #fdfdfd 0px, #fdfdfd 1px, #cfd2db 2px, #fdfdfd 3px);
+  border-radius: 2px;
+}
+/* Top + bottom — paper edge */
+.book3d__top {
+  width: 170px; height: 38px;
+  transform: translate(-50%, -50%) rotateX(90deg) translateZ(115px);
+  background: repeating-linear-gradient(to right, #fdfdfd 0px, #fdfdfd 1px, #d2d5de 2px, #fdfdfd 3px);
+}
+.book3d__bottom {
+  width: 170px; height: 38px;
+  transform: translate(-50%, -50%) rotateX(-90deg) translateZ(115px);
+  background: repeating-linear-gradient(to right, #eef0f5 0px, #eef0f5 1px, #c2c5d0 2px, #eef0f5 3px);
+}
+/* Soft shadow under the book */
+.book3d-stage::after {
+  content: ''; position: absolute; bottom: 8px;
+  width: 150px; height: 22px; border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(67,97,238,0.28), transparent 70%);
+  filter: blur(4px);
+  animation: book3dShadow 7s ease-in-out infinite;
+}
+@keyframes book3dShadow {
+  0%, 100% { transform: scale(1); opacity: 0.55; }
+  50%      { transform: scale(0.82); opacity: 0.32; }
+}
+@media (max-width: 480px) {
+  .book3d { transform: rotateX(8deg) rotateY(-28deg) scale(0.85); }
+}
+
 .login-card h1 {
   font-family: 'Noto Nastaliq Urdu', serif;
   font-size: 30px;
