@@ -361,6 +361,7 @@ body {
   background-size: 16px 16px;
   opacity: 0;
   transition: opacity 0.3s;
+  pointer-events: none;
 }
 
 .drop-zone.drag {
