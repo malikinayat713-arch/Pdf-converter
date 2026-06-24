@@ -23,7 +23,10 @@ const SERVER_START = Date.now();
 // ═══════════════════════════════════════════════════════════════════════════
 // ANALYTICS ENGINE
 // ═══════════════════════════════════════════════════════════════════════════
-const ANALYTICS_PATH = path.join(__dirname, 'data', 'analytics.json');
+// DATA_DIR is configurable so it can point to a persistent Railway Volume
+// (e.g. DATA_DIR=/data). Defaults to local ./data for development.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const ANALYTICS_PATH = path.join(DATA_DIR, 'analytics.json');
 
 let analytics = { users: {}, dailyStats: {}, recentActivity: [] };
 
@@ -93,7 +96,7 @@ loadAnalytics();
 // User uploads word-lists so the system learns which words are personalities,
 // places, books, languages — supplements the built-in lists.
 // ═══════════════════════════════════════════════════════════════════════════
-const DICT_PATH = path.join(__dirname, 'data', 'dictionary.json');
+const DICT_PATH = path.join(DATA_DIR, 'dictionary.json');
 const DICT_CATS = ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں'];
 
 let customDict = { شخصیات: [], اماکن: [], کتابیں: [], زبانیں: [] };
@@ -1819,18 +1822,35 @@ const ADMIN_EMAILS = new Set(
   ].filter(Boolean)
 );
 
-const isAdmin = (req, res, next) => {
-  let email = req.session.user?.email;
-  if (!email) {
-    const xuHeader = req.headers['x-user'] || req.get('X-User');
-    if (xuHeader) {
-      try { email = JSON.parse(Buffer.from(xuHeader, 'base64').toString())?.email; } catch (e) {}
-    }
+// Resolve the caller's VERIFIED email.
+// 1) session (set server-side at OAuth — trustworthy)
+// 2) else verify the Google access token (X-Tokens) by calling Google —
+//    the token can't be forged, so this can't be spoofed (unlike a plain header)
+async function resolveVerifiedEmail(req) {
+  if (req.session.user?.email) return req.session.user.email;
+  const th = req.headers['x-tokens'] || req.get('X-Tokens');
+  if (th) {
+    try {
+      const tokens = JSON.parse(th);
+      oauth2Client.setCredentials(tokens);
+      const { data } = await google.oauth2({ version: 'v2', auth: oauth2Client }).userinfo.get();
+      return data.email || null;
+    } catch (e) { /* invalid/expired token */ }
   }
-  if (!email || !ADMIN_EMAILS.has(email.toLowerCase())) {
+  return null;
+}
+
+const isAdmin = async (req, res, next) => {
+  try {
+    const email = await resolveVerifiedEmail(req);
+    if (!email || !ADMIN_EMAILS.has(email.toLowerCase())) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    req.adminEmail = email;
+    next();
+  } catch (e) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  next();
 };
 
 app.get('/api/admin/stats', isAdmin, (req, res) => {
@@ -1879,14 +1899,14 @@ app.get('/api/admin/activity', isAdmin, (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Get current dictionary (counts + terms)
-app.get('/api/dictionary', requireAuth, (req, res) => {
+app.get('/api/dictionary', isAdmin, (req, res) => {
   const counts = {};
   for (const c of DICT_CATS) counts[c] = customDict[c].length;
   res.json({ dictionary: customDict, counts });
 });
 
 // Add terms (pasted text — newline/comma separated) to a category
-app.post('/api/dictionary/add', requireAuth, (req, res) => {
+app.post('/api/dictionary/add', isAdmin, (req, res) => {
   const { category, text } = req.body;
   if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
   const terms = String(text || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
@@ -1906,7 +1926,7 @@ const dictUpload = multer({
 });
 
 // Upload a document (txt / Word) — every line becomes a term in the category
-app.post('/api/dictionary/upload', requireAuth, dictUpload.single('file'), async (req, res) => {
+app.post('/api/dictionary/upload', isAdmin, dictUpload.single('file'), async (req, res) => {
   try {
     const category = req.body.category;
     if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
@@ -1931,7 +1951,7 @@ app.post('/api/dictionary/upload', requireAuth, dictUpload.single('file'), async
 });
 
 // Remove a single term
-app.post('/api/dictionary/remove', requireAuth, (req, res) => {
+app.post('/api/dictionary/remove', isAdmin, (req, res) => {
   const { category, term } = req.body;
   if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
   customDict[category] = customDict[category].filter(t => t !== term);
@@ -1940,7 +1960,7 @@ app.post('/api/dictionary/remove', requireAuth, (req, res) => {
 });
 
 // Clear an entire category
-app.post('/api/dictionary/clear', requireAuth, (req, res) => {
+app.post('/api/dictionary/clear', isAdmin, (req, res) => {
   const { category } = req.body;
   if (!DICT_CATS.includes(category)) return res.status(400).json({ error: 'Invalid category' });
   customDict[category] = [];
