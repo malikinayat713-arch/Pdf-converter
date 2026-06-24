@@ -1206,6 +1206,43 @@ function extractFromPage(text, pageNum) {
     }
   }
 
+  // ── 1d. "Name، Title" comma pattern (محمد اقبال، علامہ / شولز، مسٹر) ──────
+  // Very common in Urdu prose & indexes: a name followed by ، then a title.
+  {
+    const clauses = text.split(/[\n۔؛]/);
+    for (const clause of clauses) {
+      const segs = clause.split('،');
+      for (let s = 1; s < segs.length; s++) {
+        const firstTok = (segs[s].trim().split(/\s+/)[0] || '').replace(/[^؀-ۿ]/g, '');
+        if (firstTok && HONORIFICS.includes(firstTok)) {
+          const prevWords = segs[s - 1].trim().split(/\s+/)
+            .map(w => w.replace(/[۔،؟!:؛"'()\[\]{}]/g, '')).filter(Boolean);
+          const nameParts = [];
+          for (let p = prevWords.length - 1; p >= 0 && nameParts.length < 3; p--) {
+            const w = prevWords[p];
+            if (!w || NAME_STOP.has(w) || HONORIFICS.includes(w) || w.length < 2) break;
+            nameParts.unshift(w);
+          }
+          if (nameParts.length >= 1) found.شخصیات.add(`${nameParts.join(' ')}، ${firstTok}`);
+        }
+      }
+    }
+  }
+
+  // ── 1e. Patronymic names (X بن Y / X ابن Y — اسد اللہ بن ...) ─────────────
+  for (let i = 1; i < words.length - 1; i++) {
+    if (words[i] === 'بن' || words[i] === 'ابن' || words[i] === 'ولد') {
+      const before = words[i - 1], after = words[i + 1];
+      if (before && after && !NAME_STOP.has(before) && !NAME_STOP.has(after)
+          && before.length >= 2 && after.length >= 2) {
+        const pre = words[i - 2];
+        const head = (pre && !NAME_STOP.has(pre) && !HONORIFICS.includes(pre) && pre.length >= 2)
+          ? `${pre} ${before}` : before;
+        found.شخصیات.add(`${head} ${words[i]} ${after}`);
+      }
+    }
+  }
+
   // ── 1c. Well-known personalities (normalized match, no honorific needed) ──
   for (const name of FAMOUS_NAMES) matchKnown(name, 'شخصیات');
 
