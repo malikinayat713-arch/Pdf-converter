@@ -401,7 +401,7 @@ body {
   display: flex;
   align-items: center;
   gap: 16px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .file-icon {

@@ -221,14 +221,36 @@ async function extractPdfText(pdfData) {
 // ─── Word (.docx) Text Extraction ────────────────────────────────────────────
 async function extractWordText(filePath) {
   const mammoth = require('mammoth');
-  const result  = await mammoth.extractRawText({ path: filePath });
-  const full    = result.value || '';
 
-  // Split at natural line breaks; group ~25 lines per "page"
-  const lines = full.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length === 0) return [{ pageNum: 1, text: full }];
+  // Use HTML output so mammoth inserts <hr> tags at actual Word page breaks
+  const result = await mammoth.convertToHtml({ path: filePath });
+  const html   = result.value || '';
 
-  const LINES_PER_PAGE = 25;
+  // Strip all tags except <hr> (page breaks), replace block tags with newlines
+  const normalized = html
+    .replace(/<hr\s*\/?>/gi, '\x00PAGEBREAK\x00')  // mark real page breaks
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+    .replace(/<[^>]+>/g, '')                         // strip remaining tags
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+  const sections = normalized.split('\x00PAGEBREAK\x00');
+  const hasRealBreaks = sections.length > 1;
+
+  if (hasRealBreaks) {
+    // Exact page numbers from actual Word page breaks
+    return sections
+      .map((sec, i) => ({ pageNum: i + 1, text: sec.replace(/\n{3,}/g, '\n\n').trim() }))
+      .filter(p => p.text.length > 0);
+  }
+
+  // Fallback: no explicit page breaks — estimate at ~40 lines per page
+  // (40 lines is closer to a typical A4 Word page than the old 25)
+  const lines = normalized.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [{ pageNum: 1, text: normalized.trim() }];
+
+  const LINES_PER_PAGE = 40;
   const pages = [];
   for (let i = 0; i < lines.length; i += LINES_PER_PAGE) {
     pages.push({
