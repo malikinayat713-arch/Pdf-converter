@@ -522,6 +522,26 @@ export default function App() {
     }
   };
 
+  // Download a PDF report (Urdu) listing every page where the word appears
+  const downloadReportPdf = async () => {
+    if (!searchResults || searchResults.results.length === 0) return;
+    setDownloading('reportpdf');
+    setSearchError(null);
+    try {
+      const { data } = await axios.post(
+        `${API}/api/pdf/create-report-pdf`,
+        { pdfId, searchTerm, results: searchResults.results },
+        blobConfig()
+      );
+      triggerDownload(new Blob([data], { type: 'application/pdf' }), `${searchTerm}-report.pdf`);
+    } catch (e) {
+      const msg = await readBlobError(e);
+      setSearchError('PDF report error: ' + msg);
+    } finally {
+      setDownloading(null);
+    }
+  };
+
   // ── فہارس Functions ──
   const uploadForFiharis = async () => {
     if (!fiharisFile) { setFiharisError('PDF select karo pehle'); return; }
@@ -1024,17 +1044,25 @@ export default function App() {
                             <div className="download-buttons">
                               <button
                                 className="btn-download"
+                                onClick={downloadReportPdf}
+                                disabled={downloading !== null}
+                                title="PDF report — har page jahan lafz mila (Word ya PDF dono ke liye)"
+                              >
+                                {downloading === 'reportpdf' ? '⏳...' : '📕 PDF Report'}
+                              </button>
+                              <button
+                                className="btn-download"
                                 onClick={downloadReport}
                                 disabled={downloading !== null}
                                 title="Detailed Word report (page numbers + snippets)"
                               >
-                                {downloading === 'report' ? '⏳...' : '📋 Report'}
+                                {downloading === 'report' ? '⏳...' : '📋 Word Report'}
                               </button>
                               <button
                                 className="btn-download"
                                 onClick={downloadFilteredPdf}
                                 disabled={downloading !== null}
-                                title="PDF of only the matching pages"
+                                title="PDF of only the matching pages (sirf PDF input ke liye)"
                               >
                                 {downloading === 'pdf' ? '⏳...' : '📄 Matching PDF'}
                               </button>

@@ -7,8 +7,14 @@ const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const { createCanvas } = require('canvas');
+const { createCanvas, registerFont } = require('canvas');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+// Register bundled Urdu font for rendering Urdu text in generated PDFs.
+// node-canvas uses HarfBuzz so it shapes/joins Urdu correctly (RTL aware).
+try {
+  registerFont(path.join(__dirname, 'fonts', 'Amiri-Regular.ttf'), { family: 'Amiri' });
+} catch (e) { console.error('Font register error:', e.message); }
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -473,6 +479,10 @@ app.post('/api/pdf/search', requireAuth, (req, res) => {
     const needle = normalizeUrdu(searchTerm);
     if (!needle) return res.json({ searchTerm, totalMatches: 0, results: [] });
 
+    // Real (printed) page numbers so results match the book exactly (cached once)
+    if (!cached.pageMap) cached.pageMap = buildPageNumberMap(cached.pages).map;
+    const pageMap = cached.pageMap;
+
     const results = [];
     let totalMatches = 0;
 
@@ -497,7 +507,7 @@ app.post('/api/pdf/search', requireAuth, (req, res) => {
         const snippet = text.substring(startIdx, endIdx).replace(/\s+/g, ' ').trim();
 
         results.push({
-          pageNum,
+          pageNum: pageMap[pageNum] || pageNum,
           matchCount,
           snippet: snippet ? `…${snippet}…` : '[preview nahi]'
         });
@@ -645,6 +655,127 @@ app.post('/api/pdf/create-report', requireAuth, async (req, res) => {
   } catch (e) {
     console.error('Report error:', e);
     res.status(500).json({ error: 'Report create fail: ' + e.message });
+  }
+});
+
+// ─── Search Report as a real PDF (Urdu rendered via canvas/HarfBuzz) ─────────
+async function buildSearchReportPdf(searchTerm, results, fileName) {
+  const W = 1240, H = 1754, M = 96;       // A4 at 150 DPI
+  const FAM = 'Amiri';
+  const pages = [];                        // array of PNG buffers
+  let canvas, ctx, y;
+
+  const newPage = () => {
+    canvas = createCanvas(W, H);
+    ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+    y = M;
+  };
+  const flush = () => { if (canvas) pages.push(canvas.toBuffer('image/png')); };
+
+  // Right-aligned RTL text (for Urdu)
+  const rtl = (text, size, color = '#1e293b', bold = false) => {
+    ctx.font = `${bold ? 'bold ' : ''}${size}px ${FAM}`;
+    ctx.fillStyle = color;
+    ctx.direction = 'rtl';
+    ctx.textAlign = 'right';
+    ctx.fillText(text, W - M, y);
+  };
+  // Left-aligned LTR text (for English/labels)
+  const ltr = (text, size, color = '#1e293b', bold = false) => {
+    ctx.font = `${bold ? 'bold ' : ''}${size}px ${FAM}`;
+    ctx.fillStyle = color;
+    ctx.direction = 'ltr';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, M, y);
+  };
+  const wrapRtl = (text, size, maxW) => {
+    ctx.font = `${size}px ${FAM}`;
+    const words = String(text).split(/\s+/).filter(Boolean);
+    const lines = []; let line = '';
+    for (const w of words) {
+      const test = line ? `${line} ${w}` : w;
+      if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
+  const need = (h) => { if (y + h > H - M) { flush(); newPage(); } };
+
+  newPage();
+
+  // Header band
+  ctx.fillStyle = '#4361ee'; ctx.fillRect(0, 0, W, 130);
+  ctx.font = 'bold 46px Amiri'; ctx.fillStyle = '#ffffff';
+  ctx.direction = 'rtl'; ctx.textAlign = 'right';
+  ctx.fillText('تلاش رپورٹ', W - M, 85);
+  ctx.direction = 'ltr'; ctx.textAlign = 'left';
+  ctx.font = '26px Amiri';
+  ctx.fillText('Search Report', M, 82);
+  y = 130 + 70;
+
+  const totalMatches = results.reduce((s, r) => s + (r.matchCount || 0), 0);
+
+  // Searched word
+  rtl(`تلاش شدہ لفظ:  ${searchTerm}`, 40, '#1e293b', true);
+  y += 58;
+  // Summary
+  rtl(`کل ${toUrduNum(results.length)} صفحات پر ${toUrduNum(totalMatches)} بار ملا`, 30, '#475569');
+  y += 44;
+  if (fileName) { ltr(`File: ${fileName}`, 22, '#94a3b8'); y += 40; }
+
+  // Divider
+  ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(M, y); ctx.lineTo(W - M, y); ctx.stroke();
+  y += 50;
+
+  // Results
+  for (const r of results) {
+    need(60);
+    // Page label (Urdu, right) + match count
+    rtl(`صفحہ ${toUrduNum(r.pageNum)}  —  ${toUrduNum(r.matchCount || 1)} بار`, 32, '#4361ee', true);
+    y += 46;
+    // Snippet wrapped
+    if (r.snippet) {
+      const lines = wrapRtl(r.snippet, 26, W - 2 * M - 40);
+      for (const ln of lines) {
+        need(40);
+        rtl(ln, 26, '#475569');
+        y += 40;
+      }
+    }
+    y += 26;
+  }
+
+  flush();
+
+  // Assemble into a PDF (one full-page image per canvas page)
+  const { PDFDocument } = require('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (const png of pages) {
+    const img = await pdf.embedPng(png);
+    const page = pdf.addPage([595.28, 841.89]); // A4 in points
+    page.drawImage(img, { x: 0, y: 0, width: 595.28, height: 841.89 });
+  }
+  return await pdf.save();
+}
+
+app.post('/api/pdf/create-report-pdf', requireAuth, async (req, res) => {
+  try {
+    const { pdfId, searchTerm, results } = req.body;
+    if (!pdfId || !searchTerm || !Array.isArray(results)) {
+      return res.status(400).json({ error: 'pdfId, searchTerm aur results chahiye' });
+    }
+    const cached = pdfCache.get(pdfId);
+    const fileName = cached?.fileName || '';
+    const bytes = await buildSearchReportPdf(searchTerm, results, fileName);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="search-report.pdf"');
+    res.send(Buffer.from(bytes));
+  } catch (e) {
+    console.error('PDF report error:', e.message);
+    res.status(500).json({ error: 'PDF report fail: ' + e.message });
   }
 });
 
