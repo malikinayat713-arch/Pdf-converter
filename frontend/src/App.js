@@ -132,11 +132,12 @@ export default function App() {
   const loadAdmin = async () => {
     setAdminLoading(true);
     try {
-      const headers = { withCredentials: true };
       const storedTokens = localStorage.getItem('tokens');
-      const axiosOpts = storedTokens
-        ? { withCredentials: true, headers: { 'X-Tokens': storedTokens } }
-        : { withCredentials: true };
+      const storedUser   = localStorage.getItem('user');
+      const hdrs = {};
+      if (storedTokens) hdrs['X-Tokens'] = storedTokens;
+      if (storedUser)   hdrs['X-User']   = btoa(storedUser);
+      const axiosOpts = { withCredentials: true, headers: hdrs };
       const [statsRes, usersRes, actRes] = await Promise.all([
         axios.get(`${API}/api/admin/stats`, axiosOpts),
         axios.get(`${API}/api/admin/users`, axiosOpts),
