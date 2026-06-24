@@ -26,6 +26,17 @@ export default function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
   }, []);
 
+  // 3D tilt — follows the mouse for a realistic depth effect
+  const handleTilt = useCallback((e) => {
+    const el = e.currentTarget;
+    const r = el.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    el.style.transform = `perspective(800px) rotateY(${px * 12}deg) rotateX(${-py * 12}deg) translateY(-4px)`;
+  }, []);
+  const resetTilt = useCallback((e) => { e.currentTarget.style.transform = ''; }, []);
+  const tilt = { onMouseMove: handleTilt, onMouseLeave: resetTilt };
+
   // Admin State
   const [adminMode, setAdminMode] = useState(false);
   const [adminStats, setAdminStats] = useState(null);
@@ -837,22 +848,22 @@ export default function App() {
             <section className="features">
               <h2 className="sec-heading">کیا کیا کر سکتے ہیں؟</h2>
               <div className="feature-grid">
-                <div className="feature-card">
+                <div className="feature-card" {...tilt}>
                   <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#4361ee,#6d8cfc)' }}>📄</div>
                   <h3>Convert to Word</h3>
                   <p>PDF، Image یا Word دیں — صاف ستھری Urdu Word file حاصل کریں۔ Scanned pages کے لیے OCR موجود ہے۔</p>
                 </div>
-                <div className="feature-card">
+                <div className="feature-card" {...tilt}>
                   <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#7c3aed,#a855f7)' }}>🔍</div>
                   <h3>Smart Search</h3>
                   <p>کوئی بھی لفظ ڈھونڈیں۔ زیر زبر کا فرق نہیں پڑتا۔ PDF رپورٹ میں ہر صفحہ نمبر مل جائے گا۔</p>
                 </div>
-                <div className="feature-card">
+                <div className="feature-card" {...tilt}>
                   <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#10b981,#34d399)' }}>📋</div>
                   <h3>فہارس (Index)</h3>
                   <p>شخصیات، اماکن، کتابیں اور زبانیں کی مکمل فہرست — ہر نام کے سامنے صفحہ نمبر۔</p>
                 </div>
-                <div className="feature-card">
+                <div className="feature-card" {...tilt}>
                   <div className="feature-ic" style={{ background: 'linear-gradient(135deg,#f59e0b,#fbbf24)' }}>🎯</div>
                   <h3>میری فہرست (100%)</h3>
                   <p>اپنے نام خود دیں اور tool ہر صفحے پر بالکل درست ڈھونڈ کے رپورٹ بنا دے گا۔</p>
@@ -896,39 +907,31 @@ export default function App() {
                 <span className="welcome-hi">السلام علیکم، {user.name.split(' ')[0]} 👋</span>
                 <span className="welcome-sub">Aaj kya karna hai? Neeche se tool chuniye.</span>
               </div>
-              <div className="welcome-quick">
-                <button className={`wq ${mode==='convert'?'on':''}`} onClick={() => setMode('convert')}>📄 Convert</button>
-                <button className={`wq ${mode==='search'?'on':''}`} onClick={() => setMode('search')}>🔍 Search</button>
-                <button className={`wq ${mode==='fiharis'?'on':''}`} onClick={() => setMode('fiharis')}>📋 فہارس</button>
-              </div>
+              <div className="welcome-book">📚</div>
             </div>
 
-            {/* Mode Tabs */}
-            <div className="mode-tabs">
-              <button
-                className={`tab ${mode === 'convert' ? 'active' : ''}`}
-                onClick={() => setMode('convert')}
-              >
-                📄 Convert
+            {/* 3D Tool Cards */}
+            <div className="tool-cards">
+              <button className={`tool-card ${mode === 'convert' ? 'active' : ''}`} onClick={() => setMode('convert')} {...tilt}>
+                <span className="tool-ic" style={{ background: 'linear-gradient(135deg,#4361ee,#6d8cfc)' }}>📄</span>
+                <span className="tool-name">Convert</span>
+                <span className="tool-desc">PDF/Image → Word</span>
               </button>
-              <button
-                className={`tab ${mode === 'search' ? 'active' : ''}`}
-                onClick={() => setMode('search')}
-              >
-                🔍 Search
+              <button className={`tool-card ${mode === 'search' ? 'active' : ''}`} onClick={() => setMode('search')} {...tilt}>
+                <span className="tool-ic" style={{ background: 'linear-gradient(135deg,#7c3aed,#a855f7)' }}>🔍</span>
+                <span className="tool-name">Search</span>
+                <span className="tool-desc">لفظ + صفحہ نمبر</span>
               </button>
-              <button
-                className={`tab ${mode === 'fiharis' ? 'active' : ''}`}
-                onClick={() => setMode('fiharis')}
-              >
-                📋 فہارس
+              <button className={`tool-card ${mode === 'fiharis' ? 'active' : ''}`} onClick={() => setMode('fiharis')} {...tilt}>
+                <span className="tool-ic" style={{ background: 'linear-gradient(135deg,#10b981,#34d399)' }}>📋</span>
+                <span className="tool-name">فہارس</span>
+                <span className="tool-desc">Index / فہرست</span>
               </button>
               {isAdminUser && (
-                <button
-                  className={`tab ${mode === 'dictionary' ? 'active' : ''}`}
-                  onClick={() => { setMode('dictionary'); loadDict(); }}
-                >
-                  📖 لغت
+                <button className={`tool-card ${mode === 'dictionary' ? 'active' : ''}`} onClick={() => { setMode('dictionary'); loadDict(); }} {...tilt}>
+                  <span className="tool-ic" style={{ background: 'linear-gradient(135deg,#f59e0b,#fbbf24)' }}>📖</span>
+                  <span className="tool-name">لغت</span>
+                  <span className="tool-desc">Vocabulary</span>
                 </button>
               )}
             </div>

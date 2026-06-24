@@ -1857,3 +1857,52 @@ mark.hl {
 [data-theme="dark"] .admin-table thead th { background: #0f1729; color: var(--muted); }
 [data-theme="dark"] .admin-table tbody tr:hover { background: #0f1729; }
 [data-theme="dark"] .page-badge { background: #0f1729; color: #93c5fd; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   3D TOOL CARDS (dashboard)
+═══════════════════════════════════════════════════════════════════ */
+.tool-cards {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 26px;
+}
+@media (max-width: 700px) { .tool-cards { grid-template-columns: repeat(2, 1fr); } }
+.tool-card {
+  background: var(--card); border: 2px solid var(--border); border-radius: 18px;
+  padding: 20px 14px; cursor: pointer; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  transform-style: preserve-3d; transition: transform 0.18s ease, box-shadow 0.25s, border-color 0.25s;
+  will-change: transform; box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+.tool-card:hover { box-shadow: 0 18px 40px rgba(67,97,238,0.20); border-color: #c7d2fe; }
+.tool-card.active {
+  border-color: transparent;
+  background: linear-gradient(135deg, rgba(67,97,238,0.10), rgba(124,58,237,0.10));
+  box-shadow: 0 10px 30px rgba(67,97,238,0.22), inset 0 0 0 2px #7c3aed;
+}
+.tool-ic {
+  width: 56px; height: 56px; border-radius: 16px; display: flex; align-items: center;
+  justify-content: center; font-size: 26px; color: white;
+  box-shadow: 0 8px 18px rgba(0,0,0,0.2); transform: translateZ(30px);
+}
+.tool-name { font-size: 16px; font-weight: 800; color: var(--text); transform: translateZ(18px); }
+.tool-desc { font-size: 12px; color: var(--muted); transform: translateZ(10px); }
+
+/* Floating book in welcome banner */
+.welcome-book {
+  font-size: 52px; filter: drop-shadow(0 8px 14px rgba(0,0,0,0.3));
+  animation: welcomeFloat 4s ease-in-out infinite;
+}
+@keyframes welcomeFloat {
+  0%, 100% { transform: translateY(0) rotate(-6deg); }
+  50%      { transform: translateY(-12px) rotate(6deg); }
+}
+
+/* Landing feature cards: enable 3D tilt depth */
+.feature-card { transform-style: preserve-3d; will-change: transform; }
+.feature-card .feature-ic { transform: translateZ(36px); }
+.feature-card h3 { transform: translateZ(22px); }
+.feature-card p { transform: translateZ(12px); }
+
+[data-theme="dark"] .tool-card { background: var(--card); }
+[data-theme="dark"] .tool-card.active {
+  background: linear-gradient(135deg, rgba(67,97,238,0.18), rgba(124,58,237,0.18));
+}
