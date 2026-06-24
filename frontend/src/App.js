@@ -10,6 +10,14 @@ export default function App() {
   const [mode, setMode] = useState('convert');
   const [dragOver, setDragOver] = useState(false);
 
+  // Admin State
+  const [adminMode, setAdminMode] = useState(false);
+  const [adminStats, setAdminStats] = useState(null);
+  const [adminUsers, setAdminUsers] = useState(null);
+  const [adminActivity, setAdminActivity] = useState(null);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const ADMIN_EMAIL = 'alphacoders930@gmail.com';
+
   // فہارس State
   const [fiharisFile, setFiharisFile] = useState(null);
   const [fiharisPdfId, setFiharisPdfId] = useState(null);
@@ -119,6 +127,49 @@ export default function App() {
     const totalEstimated = (elapsed / percent) * 100;
     return Math.max(0, totalEstimated - elapsed);
   };
+
+  // ── Admin Functions ──
+  const loadAdmin = async () => {
+    setAdminLoading(true);
+    try {
+      const headers = { withCredentials: true };
+      const storedTokens = localStorage.getItem('tokens');
+      const axiosOpts = storedTokens
+        ? { withCredentials: true, headers: { 'X-Tokens': storedTokens } }
+        : { withCredentials: true };
+      const [statsRes, usersRes, actRes] = await Promise.all([
+        axios.get(`${API}/api/admin/stats`, axiosOpts),
+        axios.get(`${API}/api/admin/users`, axiosOpts),
+        axios.get(`${API}/api/admin/activity?limit=50`, axiosOpts),
+      ]);
+      setAdminStats(statsRes.data);
+      setAdminUsers(usersRes.data.users);
+      setAdminActivity(actRes.data.activity);
+    } catch (e) {
+      console.error('Admin load error', e);
+    }
+    setAdminLoading(false);
+  };
+
+  const openAdmin = () => { setAdminMode(true); loadAdmin(); };
+  const closeAdmin = () => setAdminMode(false);
+
+  const fmtUptime = (s) => {
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
+  const fmtAgo = (ts) => {
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s/60)}m ago`;
+    if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/86400)}d ago`;
+  };
+
+  const actIcon = { converts: '📄', searches: '🔍', indexes: '📋' };
 
   // ── Convert Functions ──
   const handleDrop = useCallback(e => {
@@ -560,6 +611,11 @@ export default function App() {
           </div>
           {user && (
             <div className="user-pill">
+              {user.email === ADMIN_EMAIL && (
+                <button className="btn-admin" onClick={openAdmin} title="Admin Panel">
+                  ⚙️ Admin
+                </button>
+              )}
               <img src={user.picture} alt="" className="user-av" />
               <span>{user.name.split(' ')[0]}</span>
               <button className="btn-logout" onClick={logout}>
@@ -1094,6 +1150,180 @@ export default function App() {
       <footer className="footer">
         <span>© Urdu PDF Pro 2026</span> • <span>Made with ❤️</span>
       </footer>
+
+      {/* ── Admin Panel Modal ── */}
+      {adminMode && (
+        <div className="admin-overlay" onClick={e => e.target === e.currentTarget && closeAdmin()}>
+          <div className="admin-panel">
+            <div className="admin-header">
+              <h2>⚙️ Admin Dashboard</h2>
+              <button className="admin-close" onClick={closeAdmin}>✕</button>
+            </div>
+
+            {adminLoading ? (
+              <div className="admin-loading">Loading analytics...</div>
+            ) : adminStats ? (
+              <div className="admin-body">
+
+                {/* Stat Cards */}
+                <div className="admin-cards">
+                  <div className="admin-card blue">
+                    <div className="admin-card-icon">👥</div>
+                    <div className="admin-card-num">{adminStats.totalUsers}</div>
+                    <div className="admin-card-label">Total Users</div>
+                  </div>
+                  <div className="admin-card green">
+                    <div className="admin-card-icon">📄</div>
+                    <div className="admin-card-num">{adminStats.totalConverts}</div>
+                    <div className="admin-card-label">Conversions</div>
+                  </div>
+                  <div className="admin-card purple">
+                    <div className="admin-card-icon">🔍</div>
+                    <div className="admin-card-num">{adminStats.totalSearches}</div>
+                    <div className="admin-card-label">Searches</div>
+                  </div>
+                  <div className="admin-card orange">
+                    <div className="admin-card-icon">📋</div>
+                    <div className="admin-card-num">{adminStats.totalIndexes}</div>
+                    <div className="admin-card-label">Indexes</div>
+                  </div>
+                </div>
+
+                {/* Charts + Activity row */}
+                <div className="admin-mid-row">
+                  {/* 7-Day Bar Chart */}
+                  <div className="admin-section admin-chart-box">
+                    <h3>Last 7 Days Activity</h3>
+                    <div className="admin-chart">
+                      {adminStats.dailyStats.map((d, i) => {
+                        const maxVal = Math.max(...adminStats.dailyStats.map(x => x.converts + x.searches + x.indexes), 1);
+                        const total = d.converts + d.searches + d.indexes;
+                        const height = Math.max(4, Math.round((total / maxVal) * 100));
+                        const label = d.date.slice(5); // MM-DD
+                        return (
+                          <div className="admin-bar-col" key={i} title={`${label}: ${total} actions`}>
+                            <div className="admin-bar-wrap">
+                              <div className="admin-bar-stack" style={{ height: `${height}%` }}>
+                                <div className="admin-bar-seg converts" style={{ flex: d.converts }} title={`Converts: ${d.converts}`} />
+                                <div className="admin-bar-seg searches" style={{ flex: d.searches }} title={`Searches: ${d.searches}`} />
+                                <div className="admin-bar-seg indexes"  style={{ flex: d.indexes  }} title={`Indexes: ${d.indexes}`} />
+                              </div>
+                            </div>
+                            <div className="admin-bar-label">{label}</div>
+                            <div className="admin-bar-num">{total}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="admin-chart-legend">
+                      <span className="legend-dot converts" /> Converts
+                      <span className="legend-dot searches" /> Searches
+                      <span className="legend-dot indexes" />  Indexes
+                    </div>
+                  </div>
+
+                  {/* Recent Activity */}
+                  <div className="admin-section admin-activity-box">
+                    <h3>Recent Activity</h3>
+                    <div className="admin-activity-list">
+                      {(adminActivity || []).slice(0, 20).map((a, i) => (
+                        <div className="admin-act-item" key={i}>
+                          <span className="admin-act-icon">{actIcon[a.type] || '•'}</span>
+                          <div className="admin-act-body">
+                            <div className="admin-act-name">{a.userName}</div>
+                            <div className="admin-act-detail">{a.details || a.type}</div>
+                          </div>
+                          <div className="admin-act-time">{fmtAgo(a.timestamp)}</div>
+                        </div>
+                      ))}
+                      {(!adminActivity || adminActivity.length === 0) && (
+                        <div className="admin-empty">No activity yet</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* System Health */}
+                <div className="admin-section admin-health">
+                  <h3>System Health</h3>
+                  <div className="admin-health-grid">
+                    <div className="admin-health-item">
+                      <span className="health-label">Uptime</span>
+                      <span className="health-val green">{fmtUptime(adminStats.system.uptimeSeconds)}</span>
+                    </div>
+                    <div className="admin-health-item">
+                      <span className="health-label">PDF Cache</span>
+                      <span className="health-val blue">{adminStats.system.cacheSize} files</span>
+                    </div>
+                    <div className="admin-health-item">
+                      <span className="health-label">Heap Memory</span>
+                      <span className="health-val orange">{adminStats.system.memHeapMB} MB</span>
+                    </div>
+                    <div className="admin-health-item">
+                      <span className="health-label">RSS Memory</span>
+                      <span className="health-val purple">{adminStats.system.memRssMB} MB</span>
+                    </div>
+                    <div className="admin-health-item">
+                      <span className="health-label">Node.js</span>
+                      <span className="health-val">{adminStats.system.nodeVersion}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Users Table */}
+                <div className="admin-section">
+                  <div className="admin-section-hdr">
+                    <h3>Users ({(adminUsers || []).length})</h3>
+                    <button className="admin-refresh" onClick={loadAdmin}>↻ Refresh</button>
+                  </div>
+                  <div className="admin-table-wrap">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>User</th>
+                          <th>Email</th>
+                          <th>Converts</th>
+                          <th>Searches</th>
+                          <th>Indexes</th>
+                          <th>Last Active</th>
+                          <th>Joined</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(adminUsers || []).map((u, i) => (
+                          <tr key={u.id || i} className={i % 2 === 0 ? 'row-even' : ''}>
+                            <td>
+                              <div className="admin-user-cell">
+                                {u.picture
+                                  ? <img src={u.picture} alt="" className="admin-user-av" />
+                                  : <div className="admin-user-av placeholder">{u.name?.[0] || '?'}</div>
+                                }
+                                <span className="admin-user-name">{u.name}</span>
+                              </div>
+                            </td>
+                            <td className="admin-email">{u.email}</td>
+                            <td className="admin-num">{u.converts || 0}</td>
+                            <td className="admin-num">{u.searches || 0}</td>
+                            <td className="admin-num">{u.indexes || 0}</td>
+                            <td className="admin-time">{fmtAgo(u.lastSeen)}</td>
+                            <td className="admin-time">{new Date(u.firstSeen).toLocaleDateString()}</td>
+                          </tr>
+                        ))}
+                        {(!adminUsers || adminUsers.length === 0) && (
+                          <tr><td colSpan="7" className="admin-empty">No users yet</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+              </div>
+            ) : (
+              <div className="admin-empty">Failed to load stats. Make sure you're logged in as admin.</div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -12,6 +12,75 @@ const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const SERVER_START = Date.now();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ANALYTICS ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+const ANALYTICS_PATH = path.join(__dirname, 'data', 'analytics.json');
+
+let analytics = { users: {}, dailyStats: {}, recentActivity: [] };
+
+function loadAnalytics() {
+  try {
+    if (fs.existsSync(ANALYTICS_PATH)) {
+      analytics = JSON.parse(fs.readFileSync(ANALYTICS_PATH, 'utf8'));
+    }
+  } catch (e) { console.error('Analytics load error:', e.message); }
+}
+
+function saveAnalytics() {
+  try {
+    const dir = path.dirname(ANALYTICS_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(ANALYTICS_PATH, JSON.stringify(analytics));
+  } catch (e) { console.error('Analytics save error:', e.message); }
+}
+
+function todayKey() {
+  return new Date().toISOString().split('T')[0];
+}
+
+function ensureDay(key) {
+  if (!analytics.dailyStats[key]) {
+    analytics.dailyStats[key] = { converts: 0, searches: 0, indexes: 0, newUsers: 0 };
+  }
+}
+
+function trackUser(user) {
+  if (!user?.id) return;
+  const today = todayKey();
+  ensureDay(today);
+  if (!analytics.users[user.id]) {
+    analytics.users[user.id] = {
+      name: user.name, email: user.email, picture: user.picture,
+      firstSeen: Date.now(), lastSeen: Date.now(),
+      converts: 0, searches: 0, indexes: 0
+    };
+    analytics.dailyStats[today].newUsers++;
+  } else {
+    analytics.users[user.id].lastSeen = Date.now();
+    analytics.users[user.id].name    = user.name;
+    analytics.users[user.id].picture = user.picture;
+  }
+  saveAnalytics();
+}
+
+function trackEvent(type, user, details = '') {
+  const today = todayKey();
+  ensureDay(today);
+  if (analytics.dailyStats[today][type] !== undefined) analytics.dailyStats[today][type]++;
+  if (user?.id && analytics.users[user.id]) analytics.users[user.id][type]++;
+
+  analytics.recentActivity.unshift({
+    type, userId: user?.id, userName: user?.name || 'Unknown',
+    userPicture: user?.picture, timestamp: Date.now(), details
+  });
+  if (analytics.recentActivity.length > 300) analytics.recentActivity.length = 300;
+  saveAnalytics();
+}
+
+loadAnalytics();
 
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
 app.use(express.json());
@@ -67,6 +136,7 @@ app.get('/auth/google/callback', async (req, res) => {
     const { data: u } = await google.oauth2({ version: 'v2', auth: oauth2Client }).userinfo.get();
     req.session.tokens = tokens;
     req.session.user = { id: u.id, name: u.name, email: u.email, picture: u.picture };
+    trackUser(req.session.user);
     const userData = Buffer.from(JSON.stringify(req.session.user)).toString('base64');
     const tokenData = Buffer.from(JSON.stringify(tokens)).toString('base64');
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?login=success&user=${userData}&token=${tokenData}`);
@@ -368,6 +438,7 @@ app.post('/api/pdf/search', requireAuth, (req, res) => {
     });
 
     console.log(`✅ Found on ${results.length} pages, ${totalMatches} total matches`);
+    trackEvent('searches', req.session.user, `"${searchTerm}" — ${totalMatches} matches`);
     res.json({ searchTerm, totalMatches, results });
   } catch (e) {
     console.error('Search error:', e);
@@ -833,6 +904,7 @@ app.post('/api/convert', (req, res, next) => {
           downloadUrl
         });
 
+        trackEvent('converts', req.session.user, `${req.file?.originalname || 'file'} (${(fileSize/1024).toFixed(0)} KB)`);
         console.log(`Convert completed: ${jobId} - ${fileSize} bytes`);
 
         setTimeout(() => {
@@ -1270,6 +1342,7 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
           زبانیں: entities.زبانیں.length,
         };
 
+        trackEvent('indexes', req.session.user, `${total} pages — ${stats.شخصیات}+${stats.اماکن}+${stats.کتابیں}+${stats.زبانیں} entities`);
         progressMap.set(jobId, {
           percent: 100,
           message: '✅ فہارس تیار!',
@@ -1296,6 +1369,58 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN API
+// ═══════════════════════════════════════════════════════════════════════════
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'alphacoders930@gmail.com';
+
+const isAdmin = (req, res, next) => {
+  const user = req.session.user;
+  if (!user || user.email !== ADMIN_EMAIL) return res.status(403).json({ error: 'Access denied' });
+  next();
+};
+
+app.get('/api/admin/stats', isAdmin, (req, res) => {
+  const totalUsers    = Object.keys(analytics.users).length;
+  const totalConverts = Object.values(analytics.users).reduce((s, u) => s + (u.converts || 0), 0);
+  const totalSearches = Object.values(analytics.users).reduce((s, u) => s + (u.searches || 0), 0);
+  const totalIndexes  = Object.values(analytics.users).reduce((s, u) => s + (u.indexes  || 0), 0);
+
+  // Last 7 days
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const key = d.toISOString().split('T')[0];
+    days.push({ date: key, ...(analytics.dailyStats[key] || { converts: 0, searches: 0, indexes: 0, newUsers: 0 }) });
+  }
+
+  const uptimeSeconds = Math.floor((Date.now() - SERVER_START) / 1000);
+  const mem = process.memoryUsage();
+
+  res.json({
+    totalUsers, totalConverts, totalSearches, totalIndexes,
+    dailyStats: days,
+    system: {
+      uptimeSeconds,
+      cacheSize: pdfCache.size,
+      memHeapMB: Math.round(mem.heapUsed / 1024 / 1024),
+      memRssMB:  Math.round(mem.rss       / 1024 / 1024),
+      nodeVersion: process.version,
+    }
+  });
+});
+
+app.get('/api/admin/users', isAdmin, (req, res) => {
+  const list = Object.entries(analytics.users).map(([id, u]) => ({ id, ...u }));
+  list.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  res.json({ users: list });
+});
+
+app.get('/api/admin/activity', isAdmin, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  res.json({ activity: analytics.recentActivity.slice(0, limit) });
+});
 
 // ─── Server Start ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
