@@ -1771,6 +1771,7 @@ mark.hl {
   text-align: center; padding: 16px; font-size: 13px; color: var(--light);
   border-top: 1px solid var(--border);
 }
+.footer-credit { margin-top: 6px; font-weight: 700; color: var(--blue); }
 
 /* ═══════════════════════════════════════════════════════════════════
    TOAST NOTIFICATIONS

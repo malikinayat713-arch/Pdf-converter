@@ -1588,7 +1588,8 @@ export default function App() {
           </div>
         </div>
         <div className="footer-bottom">
-          <span>© Urdu PDF Pro 2026</span> • <span>Made with ❤️ for Urdu readers</span>
+          <div>© Urdu PDF Pro 2026 • Made with ❤️ for Urdu readers • A project by Inayat Malik</div>
+          <div className="footer-credit">Created by Awais Madni</div>
         </div>
       </footer>
 
