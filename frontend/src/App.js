@@ -37,6 +37,10 @@ export default function App() {
   const [fiharisError, setFiharisError] = useState(null);
   const [fiharisUploadTime, setFiharisUploadTime] = useState(0);
   const [fiharisGenTime, setFiharisGenTime] = useState(0);
+  // فہارس mode: 'auto' (rules) or 'custom' (my own list — 100% exact)
+  const [fiharisMode, setFiharisMode] = useState('auto');
+  const [fiharisListCat, setFiharisListCat] = useState('شخصیات');
+  const [fiharisList, setFiharisList] = useState({ شخصیات: '', اماکن: '', کتابیں: '', زبانیں: '' });
   const fiharisFileRef = useRef();
   const fiharisUploadEsRef = useRef();
   const fiharisGenEsRef = useRef();
@@ -592,7 +596,17 @@ export default function App() {
         try { config.headers = { 'X-Tokens': JSON.stringify(JSON.parse(tokenStr)) }; } catch (e) {}
       }
 
-      const { data } = await axios.post(`${API}/api/pdf/generate-index`, { pdfId: fiharisPdfId }, config);
+      const body = { pdfId: fiharisPdfId };
+      if (fiharisMode === 'custom') {
+        const ct = {};
+        for (const c of ['شخصیات','اماکن','کتابیں','زبانیں']) {
+          ct[c] = (fiharisList[c] || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+        }
+        body.customTerms = ct;
+        body.autoDetect = false; // 100% targeted — only the user's list
+      }
+
+      const { data } = await axios.post(`${API}/api/pdf/generate-index`, body, config);
 
       if (fiharisGenEsRef.current) fiharisGenEsRef.current.close();
       const es = new EventSource(`${API}/api/progress/${data.jobId}`);
@@ -636,6 +650,8 @@ export default function App() {
     setFiharisError(null);
     setFiharisUploadTime(0);
     setFiharisGenTime(0);
+    setFiharisMode('auto');
+    setFiharisList({ شخصیات: '', اماکن: '', کتابیں: '', زبانیں: '' });
   };
 
   const resetConvert = () => {
@@ -1136,9 +1152,66 @@ export default function App() {
                     </div>
 
                     {!fiharisGenProg && (
-                      <button className="btn-primary fiharis-gen-btn" onClick={generateFiharis}>
-                        📋 فہارس بنائیں
-                      </button>
+                      <>
+                        {/* Mode chooser */}
+                        <div className="fih-mode-row">
+                          <button
+                            className={`fih-mode-btn ${fiharisMode === 'auto' ? 'active' : ''}`}
+                            onClick={() => setFiharisMode('auto')}
+                          >
+                            ⚡ خودکار (Auto)
+                            <small>System خود ناموں کو پہچانے</small>
+                          </button>
+                          <button
+                            className={`fih-mode-btn ${fiharisMode === 'custom' ? 'active' : ''}`}
+                            onClick={() => setFiharisMode('custom')}
+                          >
+                            🎯 میری فہرست (100%)
+                            <small>آپ نام دیں — exact صفحہ ملے</small>
+                          </button>
+                        </div>
+
+                        {fiharisMode === 'custom' && (
+                          <div className="fih-list-card">
+                            <p className="fih-list-help">
+                              جو نام/الفاظ آپ ڈھونڈنا چاہتے ہیں وہ یہاں ڈالیں (ہر لفظ نئی لائن پر)۔
+                              Tool ہر اُس لفظ کو ہر صفحے پر 100% exact ڈھونڈ کے صفحہ نمبر دے گا۔
+                            </p>
+                            <div className="fih-list-cats">
+                              {['شخصیات','اماکن','کتابیں','زبانیں'].map(c => {
+                                const n = (fiharisList[c] || '').split(/[\n,]+/).map(s=>s.trim()).filter(Boolean).length;
+                                return (
+                                  <button
+                                    key={c}
+                                    className={`fih-list-cat ${fiharisListCat === c ? 'active' : ''}`}
+                                    onClick={() => setFiharisListCat(c)}
+                                  >
+                                    {c} {n > 0 && <span className="fih-list-badge">{n}</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <textarea
+                              className="fih-list-textarea"
+                              dir="rtl"
+                              rows={6}
+                              value={fiharisList[fiharisListCat]}
+                              onChange={e => setFiharisList(prev => ({ ...prev, [fiharisListCat]: e.target.value }))}
+                              placeholder={fiharisListCat === 'شخصیات'
+                                ? 'علامہ اقبال\nمرزا غالب\nسرسید احمد خان'
+                                : fiharisListCat === 'اماکن'
+                                ? 'لاہور\nکراچی\nدہلی'
+                                : fiharisListCat === 'کتابیں'
+                                ? 'قرآن مجید\nدیوان غالب'
+                                : 'اردو\nعربی\nفارسی'}
+                            />
+                          </div>
+                        )}
+
+                        <button className="btn-primary fiharis-gen-btn" onClick={generateFiharis}>
+                          📋 فہارس بنائیں
+                        </button>
+                      </>
                     )}
 
                     {fiharisError && <div className="error-box">{fiharisError}</div>}

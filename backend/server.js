@@ -1545,11 +1545,24 @@ async function buildFiharisDoc(entities) {
 // ─── Generate فہارس Endpoint ──────────────────────────────────────────────────
 app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
   try {
-    const { pdfId } = req.body;
+    const { pdfId, customTerms, autoDetect } = req.body;
     if (!pdfId) return res.status(400).json({ error: 'pdfId chahiye' });
 
     const cached = pdfCache.get(pdfId);
     if (!cached) return res.status(404).json({ error: 'PDF cache expire — dobara upload karo' });
+
+    // "My List" mode: user supplies the exact terms to find (100% targeted)
+    const CATS = ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں'];
+    const cleanTerms = {};
+    let customCount = 0;
+    for (const c of CATS) {
+      const arr = Array.isArray(customTerms?.[c]) ? customTerms[c] : [];
+      cleanTerms[c] = [...new Set(arr.map(t => String(t).trim()).filter(t => t.length >= 2))];
+      customCount += cleanTerms[c].length;
+    }
+    const hasCustom = customCount > 0;
+    // Auto-detect on by default, unless caller explicitly disables it
+    const doAuto = autoDetect !== false && (!hasCustom || autoDetect === true);
 
     const jobId = uuidv4();
     const update = (pct, msg) => progressMap.set(jobId, { percent: pct, message: msg, status: 'processing' });
@@ -1562,23 +1575,45 @@ app.post('/api/pdf/generate-index', requireAuth, async (req, res) => {
         // Detect real (printed) page numbers so the فہارس matches the book exactly
         const { map: pageMap, usable: usablePageNums } = buildPageNumberMap(cached.pages);
         console.log(`📄 Page numbers: ${usablePageNums ? 'using PRINTED numbers from book' : 'using sequential index'}`);
+        console.log(`🔎 Mode: ${hasCustom ? `custom (${customCount} terms)` : ''}${doAuto ? ' auto' : ''}`);
 
         // Process in chunks so we can emit progress
         const CHUNK = 20;
         const index = { شخصیات: {}, اماکن: {}, کتابیں: {}, زبانیں: {} };
 
+        const addHit = (cat, key, page) => {
+          if (!key || key.length < 2) return;
+          if (!index[cat][key]) index[cat][key] = new Set();
+          index[cat][key].add(page);
+        };
+
         for (let i = 0; i < cached.pages.length; i += CHUNK) {
           const slice = cached.pages.slice(i, i + CHUNK);
           for (const { pageNum, text } of slice) {
             const realPage = pageMap[pageNum] || pageNum;
-            const found = extractFromPage(text, realPage);
-            if (!found) continue;
-            for (const cat of ['شخصیات', 'اماکن', 'کتابیں', 'زبانیں']) {
-              for (const name of found[cat]) {
-                const key = name.trim();
-                if (!key || key.length < 2) continue;
-                if (!index[cat][key]) index[cat][key] = new Set();
-                index[cat][key].add(realPage);
+
+            // Auto detection (rule-based)
+            if (doAuto) {
+              const found = extractFromPage(text, realPage);
+              if (found) for (const cat of CATS)
+                for (const name of found[cat]) addHit(cat, name.trim(), realPage);
+            }
+
+            // Custom "My List" matching — 100% exact, normalized
+            if (hasCustom && text) {
+              const normText = normalizeUrdu(text);
+              const normWordSet = new Set(
+                text.split(/\s+/)
+                  .map(w => normalizeUrdu(w.replace(/[۔،؟!:؛\-\.,"'()[\]{}]/g, '')))
+                  .filter(Boolean)
+              );
+              for (const cat of CATS) {
+                for (const term of cleanTerms[cat]) {
+                  const nt = normalizeUrdu(term);
+                  if (!nt || nt.length < 2) continue;
+                  const hit = nt.includes(' ') ? normText.includes(nt) : normWordSet.has(nt);
+                  if (hit) addHit(cat, term, realPage);
+                }
               }
             }
           }
