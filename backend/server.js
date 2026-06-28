@@ -1066,29 +1066,22 @@ app.post('/api/convert', (req, res, next) => {
           const texts = pages.map(p => ({ text: p.text }));
           await buildWordDoc(texts, outputPath);
 
-        // ── PDF / Image: text-first, OCR only when needed ─────────────────
+        // ── PDF / Image: OCR pipeline (every page → Drive → Docs OCR) ─────
         } else {
+          if (!req.session.tokens || !req.session.tokens.access_token) {
+            throw new Error('Google authorization required. Please login again.');
+          }
           const drive = google.drive({ version: 'v3', auth: oauth2Client });
-          let folderId = null;
-          // Drive folder is created lazily — digital PDFs never need it
-          const ensureFolder = async () => {
-            if (folderId) return folderId;
-            if (!req.session.tokens || !req.session.tokens.access_token) {
-              throw new Error('Google authorization required. Please login again.');
-            }
-            const folder = await drive.files.create({
-              requestBody: { name: `OCR-${jobId}`, mimeType: 'application/vnd.google-apps.folder' },
-              fields: 'id', timeout: 30000
-            });
-            folderId = folder.data.id;
-            return folderId;
-          };
+          const folder = await drive.files.create({
+            requestBody: { name: `OCR-${jobId}`, mimeType: 'application/vnd.google-apps.folder' },
+            fields: 'id', timeout: 30000
+          });
+          const folderId = folder.data.id;
           let finalTexts = [];
 
           if (IMG_MIMES.has(fileMime)) {
             // Single image
             update(5, '🖼️ Image loaded — OCR shuru...');
-            await ensureFolder();
             const imgDest = path.join(tempDir, 'page_1' + path.extname(req.file.originalname || '.png'));
             fs.renameSync(filePath, imgDest);
             const imgRes = await ocrBatch(drive, folderId, [{ path: imgDest, mime: fileMime, pageNum: 1 }], () => {});
@@ -1102,78 +1095,54 @@ app.post('/api/convert', (req, res, next) => {
             }).promise;
             const totalPages = pdfDoc.numPages;
             update(2, `📄 PDF loaded: ${totalPages} pages`);
+
+            // Every page → image → Drive → Google Docs OCR (clean Urdu).
+            // Chunked so memory stays bounded for very large files.
+            const PAGE_CHUNK    = 30;
+            const CONV_PARALLEL = 4;
+            const scale = totalPages > 100 ? 1.7 : 2.0;
             finalTexts = new Array(totalPages).fill(null).map(() => ({ text: '' }));
+            let ocrDone = 0;
 
-            // ── STEP 1: Try the PDF's own text layer first ──────────────────
-            // (free, instant, NO Google limits) — digital PDFs of ANY size
-            // convert fully here. Only image/scanned pages fall through to OCR.
-            update(5, '📄 Text nikal raha hoon...');
-            let textPages = [];
-            try { textPages = await extractPdfText(pdfData); } catch (e) { console.error('Text extract:', e.message); }
-            const needOcr = [];
-            if (textPages.length) {
-              textPages.forEach(p => {
-                const clean = (p.text || '').replace(/\s/g, '');
-                if (clean.length >= 15) finalTexts[p.pageNum - 1] = { text: p.text };
-                else needOcr.push(p.pageNum);
-              });
-              for (let pn = textPages.length + 1; pn <= totalPages; pn++) needOcr.push(pn);
-            } else {
-              for (let pn = 1; pn <= totalPages; pn++) needOcr.push(pn);
-            }
+            for (let cs = 0; cs < totalPages; cs += PAGE_CHUNK) {
+              const ce = Math.min(cs + PAGE_CHUNK, totalPages);
+              const chunkImgs = [];
 
-            const fromText = totalPages - needOcr.length;
-            update(40, `📝 ${fromText} pages text se mile${needOcr.length ? `, ${needOcr.length} pages OCR honge...` : ' — OCR ki zaroorat nahi!'}`);
-            console.log(`Convert: ${fromText} pages via text, ${needOcr.length} via OCR`);
-
-            // ── STEP 2: OCR ONLY the pages that had no text ─────────────────
-            if (needOcr.length > 0) {
-              await ensureFolder();
-              const PAGE_CHUNK    = 25;
-              const CONV_PARALLEL = 3;
-              const scale = totalPages > 100 ? 1.7 : 2.0;
-              let ocrDone = 0;
-
-              for (let cs = 0; cs < needOcr.length; cs += PAGE_CHUNK) {
-                const slice = needOcr.slice(cs, cs + PAGE_CHUNK);
-                const chunkImgs = [];
-
-                for (let i = 0; i < slice.length; i += CONV_PARALLEL) {
-                  const batch = [];
-                  for (let k = i; k < Math.min(i + CONV_PARALLEL, slice.length); k++) {
-                    const pageNum = slice[k];
-                    const imgPath = path.join(tempDir, `p${pageNum}.png`);
-                    batch.push(
-                      pdfPageToImage(pdfDoc, pageNum, imgPath, scale)
-                        .then(() => chunkImgs.push({ path: imgPath, mime: 'image/png', pageNum }))
-                        .catch(e => console.error(`Render page ${pageNum}:`, e.message))
-                    );
-                  }
-                  await Promise.all(batch);
+              for (let i = cs; i < ce; i += CONV_PARALLEL) {
+                const batch = [];
+                for (let j = i; j < Math.min(i + CONV_PARALLEL, ce); j++) {
+                  const imgPath = path.join(tempDir, `p${j + 1}.png`);
+                  batch.push(
+                    pdfPageToImage(pdfDoc, j + 1, imgPath, scale)
+                      .then(() => chunkImgs.push({ path: imgPath, mime: 'image/png', pageNum: j + 1 }))
+                      .catch(e => console.error(`Render page ${j + 1}:`, e.message))
+                  );
                 }
-
-                if (chunkImgs.length > 0) {
-                  const chunkRes = await ocrBatch(drive, folderId, chunkImgs, (d) => {
-                    update(
-                      Math.round(45 + ((ocrDone + d) / needOcr.length) * 48),
-                      `🔤 OCR: ${ocrDone + d}/${needOcr.length} pages`
-                    );
-                  });
-                  chunkRes.forEach(({ page, text }) => {
-                    if (page >= 1 && page <= totalPages && text) finalTexts[page - 1] = { text };
-                  });
-                  ocrDone += chunkImgs.length;
-                }
-
-                for (const img of chunkImgs) try { fs.unlinkSync(img.path); } catch (e) {}
+                await Promise.all(batch);
               }
+
+              update(Math.round(5 + (ce / totalPages) * 38), `🖼️ Converted ${ce}/${totalPages} pages`);
+
+              if (chunkImgs.length > 0) {
+                const chunkRes = await ocrBatch(drive, folderId, chunkImgs, (d) => {
+                  update(
+                    Math.round(43 + ((ocrDone + d) / totalPages) * 50),
+                    `🔤 OCR: ${ocrDone + d}/${totalPages} pages`
+                  );
+                });
+                chunkRes.forEach(({ page, text }) => {
+                  if (page >= 1 && page <= totalPages) finalTexts[page - 1] = { text };
+                });
+                ocrDone += chunkImgs.length;
+              }
+
+              for (const img of chunkImgs) try { fs.unlinkSync(img.path); } catch (e) {}
             }
 
-            const filled = finalTexts.filter(t => t.text && t.text.trim()).length;
-            console.log(`Convert done: ${filled}/${totalPages} pages have text`);
+            console.log(`OCR done: ${finalTexts.filter(t => t.text).length}/${finalTexts.length} pages`);
           }
 
-          if (folderId) drive.files.delete({ fileId: folderId }).catch(() => {});
+          drive.files.delete({ fileId: folderId }).catch(() => {});
 
           update(94, '✍️ Building Word document...');
           await buildWordDoc(finalTexts, outputPath);
